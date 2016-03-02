@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 package com.cinchapi.concourse.shell;
 
 import org.junit.Assert;
+import org.junit.Ignore;
 import org.junit.Test;
 
 import com.cinchapi.concourse.shell.ConcourseShell;
@@ -108,5 +109,70 @@ public class ConcourseShellTest extends ConcourseIntegrationTest {
     @Test(expected = EvaluationException.class)
     public void testInsertRandomObjectFails() throws Throwable {
         cash.evaluate("insert(new Object())");
+    }
+
+    @Test
+    public void testConvertCorrectMethodNamesInUnderscoreToCamelcase()
+            throws IrregularEvaluationResult {
+        String record = cash.evaluate("find_or_add('name', 'concourse')");
+        String result = cash.evaluate("get('name', " + record.split("'")[1]
+                + ")");
+        Assert.assertTrue(result.contains("concourse"));
+    }
+
+    @Test(expected = EvaluationException.class)
+    public void testConvertWrongMethodNamesInUnderscoreToCamelcase()
+            throws IrregularEvaluationResult {
+        cash.evaluate("find_or_sub('name', 'concourse')");
+    }
+
+    @Test
+    public void testMultipleMethodsNameHavingMethodNameUnderscoreCase()
+            throws Throwable {
+        long record = TestData.getPositiveNumber().longValue();
+        cash.loadExternalScript(Resources.getAbsolutePath("/sample-cashrc"));
+        cash.evaluate("callA(" + record
+                + "); find_or_add('name', 'concourse'); callB(" + record
+                + "); add('name', 'jeff', 2);");
+        String resultExt = cash.evaluate("describe " + record);
+        Assert.assertTrue(resultExt.contains("[a, b]"));
+    }
+
+    @Test
+    public void testInvokeNoArgMethodWithoutParensUsingFullSyntax()
+            throws IrregularEvaluationResult {
+        cash.evaluate("inventory");
+        cash.evaluate("concourse.inventory");
+        Assert.assertTrue(true); // test passes if it does not throw an
+                                 // exception
+    }
+
+    @Test
+    public void testBasicUnderscoreMethod() throws IrregularEvaluationResult {
+        cash.evaluate("find_or_add 'foo', 1");
+        Assert.assertTrue(true); // test passes if it does not throw an
+                                 // exception
+    }
+
+    @Test
+    @Ignore
+    public void testBasicUnderscoreMethodNoArgs()
+            throws IrregularEvaluationResult {
+        // TODO: this does not work because it gets interpreted as a property
+        // and the logic to try to convert it from underscore case to camel case
+        // in ConcourseShell#evaluate does not run
+        cash.evaluate("get_server_version");
+        Assert.assertTrue(true); // test passes if it does not throw an
+                                 // exception
+    }
+
+    @Test(expected = EvaluationException.class)
+    public void testNestedApiMethodWithoutParensDoesNotInfiniteLoop()
+            throws IrregularEvaluationResult {
+        //NOTE: EvaluationException is valid exit state until GH-139 is fixed.
+        long record = client.add("foo", "2");
+        cash.evaluate("diff \"" + record + "\", time(\"last week\")");
+        Assert.assertTrue(true); // test passes if it does not throw an
+                                 // exception
     }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -131,14 +131,24 @@ public final class SyntaxTools {
         else if(!line.contains("(")) {
             // If there are no parens in the line, then we assume that this is a
             // single(e.g non-nested) function invocation.
-            String expanded = prepend + line.trim();
-            for (String option : options) {
-                if(expanded.startsWith(option)) {
-                    boolean hasArgs = expanded.split("\\s+").length > 1;
-                    if(!hasArgs) {
-                        expanded += "()";
+            if(line.startsWith(prepend)) {
+                boolean hasArgs = line.split("\\s+").length > 1;
+                if(!hasArgs) {
+                    line += "()";
+                }
+                return line;
+            }
+            else {
+                String expanded = prepend + line.trim();
+                Pattern pattern = Pattern.compile(expanded.split("\\s|\\(")[0]);
+                for (String option : options) {
+                    if(pattern.matcher(option).matches()) {
+                        boolean hasArgs = expanded.split("\\s+").length > 1;
+                        if(!hasArgs) {
+                            expanded += "()";
+                        }
+                        return expanded;
                     }
-                    return expanded;
                 }
             }
         }
@@ -146,8 +156,8 @@ public final class SyntaxTools {
             Set<String> shortInvokedMethods = parseShortInvokedMethods(line);
             for (String method : shortInvokedMethods) {
                 if(options.contains(prepend + method)) {
-                    line = line.replaceAll(method + "\\(", prepend + method
-                            + "\\(");
+                    line = line.replaceAll("(?<!\\_)" + method + "\\(", prepend
+                            + method + "\\(");
                 }
             }
         }

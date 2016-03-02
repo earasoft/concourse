@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -86,6 +86,7 @@ public abstract class ClientServerTest {
             System.out.println("");
             System.out.println("Printing relevant server logs...");
             server.printLogs(LogLevel.ERROR, LogLevel.WARN);
+            server.printLog("console");
         }
 
         @Override

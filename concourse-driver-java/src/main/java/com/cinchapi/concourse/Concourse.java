@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,7 +33,6 @@ import org.apache.thrift.transport.TSocket;
 import org.apache.thrift.transport.TTransport;
 import org.apache.thrift.transport.TTransportException;
 
-import com.cinchapi.concourse.annotate.CompoundOperation;
 import com.cinchapi.concourse.config.ConcourseClientPreferences;
 import com.cinchapi.concourse.lang.BuildableState;
 import com.cinchapi.concourse.lang.Criteria;
@@ -47,6 +46,7 @@ import com.cinchapi.concourse.thrift.SecurityException;
 import com.cinchapi.concourse.thrift.TObject;
 import com.cinchapi.concourse.thrift.TransactionToken;
 import com.cinchapi.concourse.time.Time;
+import com.cinchapi.concourse.util.ByteBuffers;
 import com.cinchapi.concourse.util.Collections;
 import com.cinchapi.concourse.util.Conversions;
 import com.cinchapi.concourse.util.Convert;
@@ -59,27 +59,25 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Multimap;
 
 /**
- * A client connection to a Concourse deployment.
- * <p>
- * Use one of the {@link Concourse#connect()} methods to instantiate.
- * </p>
+ * A client connection to a Concourse node or cluster. Use one of the
+ * {@link Concourse#connect()} methods to instantiate.
  * 
  * <h2>Overview</h2>
  * <p>
- * Concourse is a self-tuning database that is designed for both ad hoc
- * analytics and high volume transactions at scale. Developers use Concourse to
- * quickly build mission critical software while also benefiting from real time
- * insight into their most important data. With Concourse, end-to-end data
- * management requires no extra infrastructure, no prior configuration and no
- * additional coding–all of which greatly reduce costs and allow developers to
- * focus on core business problems.
+ * Concourse is a self-tuning database that enables live analytics for large
+ * streams of operational data. Developers use Concourse to quickly build
+ * software that requires both ACID transactions and the ability to get data
+ * insights on demand. With Concourse, end-to-end data management requires no
+ * extra infrastructure, no prior configuration and no additional coding–all of
+ * which greatly reduce costs and allow developers to focus on core business
+ * problems.
  * </p>
  * 
  * <h2>Using Transactions</h2>
  * <p>
  * By default, Concourse conducts every operation in {@code autocommit} mode
  * where every change is immediately written. Concourse also supports the
- * ability to stage a group of operations in transactions that are atomic,
+ * ability to stage a group of operations within transactions that are atomic,
  * consistent, isolated, and durable using the {@link #stage()},
  * {@link #commit()} and {@link #abort()} methods.
  * 
@@ -171,6 +169,17 @@ public abstract class Concourse implements AutoCloseable {
     }
 
     /**
+     * Create a new connecting by copying the connection information from the
+     * provided {@code concourse} handle.
+     * 
+     * @param concourse an existing {@link Concourse} connection handle
+     * @return the handle
+     */
+    public static Concourse copyExistingConnection(Concourse concourse) {
+        return concourse.copyConnection();
+    }
+
+    /**
      * Abort the current transaction and discard any changes that are currently
      * staged.
      * <p>
@@ -194,17 +203,16 @@ public abstract class Concourse implements AutoCloseable {
     public abstract <T> long add(String key, T value);
 
     /**
-     * Append {@code key} as {@code value} in each of the {@code records} where
-     * it doesn't exist.
+     * Atomically append {@code key} as {@code value} in each of the
+     * {@code records} where it doesn't exist.
      * 
      * @param key the field name
      * @param value the value to add
      * @param records a collection of record ids where an attempt is made to
      *            add the data
-     * @return a mapping from each record id to a boolean that indicates if the
-     *         data was added
+     * @return a {@link Map} associating each record id to a boolean that
+     *         indicates if the data was added
      */
-    @CompoundOperation
     public abstract <T> Map<Long, Boolean> add(String key, T value,
             Collection<Long> records);
 
@@ -220,175 +228,245 @@ public abstract class Concourse implements AutoCloseable {
     public abstract <T> boolean add(String key, T value, long record);
 
     /**
-     * List all the changes ever made to {@code record}.
+     * Return a list all the changes ever made to {@code record}.
      * 
      * @param record the record id
-     * @return for each change, a mapping from timestamp to a description of the
-     *         revision
+     * @return a {@link Map} associating the {@link Timestamp} of each change
+     *         to the respective description of the change
      */
     public abstract Map<Timestamp, String> audit(long record);
 
     /**
-     * List all the changes made to {@code record} since {@code start}
+     * Return a list all the changes made to {@code record} since {@code start}
      * (inclusive).
      *
      * @param record the record id
      * @param start an inclusive {@link Timestamp} of the oldest change that
-     *            should possibly be included in the audit
-     * @return for each change, a mapping from timestamp to a description of the
-     *         revision
+     *            should possibly be included in the audit – created from either
+     *            a {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating the {@link Timestamp} of each change
+     *         to the respective description of the change
      */
     public abstract Map<Timestamp, String> audit(long record, Timestamp start);
 
     /**
-     * List all the changes made to {@code record} between {@code start}
-     * (inclusive) and {@code end} (non-inclusive).
+     * Return a list all the changes made to {@code record} between
+     * {@code start} (inclusive) and {@code end} (non-inclusive).
      *
      * @param record the record id
      * @param start an inclusive {@link Timestamp} for the oldest change that
-     *            should possibly be included in the audit
+     *            should possibly be included in the audit – created from either
+     *            a {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
      * @param end a non-inclusive {@link Timestamp} for the most recent change
-     *            that should possibly be included in the audit
-     * @return for each change, a mapping from timestamp to a description of the
-     *         revision
+     *            that should possibly be included in the audit – created from
+     *            either a {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating the {@link Timestamp} of each change
+     *         to the respective description of the change
      */
     public abstract Map<Timestamp, String> audit(long record, Timestamp start,
             Timestamp end);
 
     /**
-     * List all the changes ever made to the {@code key} field in {@code record}
+     * Return a list all the changes ever made to the {@code key} field in
+     * {@code record}
      *
      * @param key the field name
      * @param record the record id
-     * @return for each change, a mapping from timestamp to a description of the
-     *         revision
+     * @return a {@link Map} associating the {@link Timestamp} of each change
+     *         to the respective description of the change
      */
     public abstract Map<Timestamp, String> audit(String key, long record);
 
     /**
-     * List all the changes made to the {@code key} field in {@code record}
-     * since {@code start} (inclusive).
+     * Return a list of all the changes made to the {@code key} field in
+     * {@code record} since {@code start} (inclusive).
      * 
      * @param key the field name
      * @param record the record id
      * @param start an inclusive {@link Timestamp} for the oldest change that
-     *            should possibly be included in the audit
-     * @return for each change, a mapping from timestamp to a description of the
-     *         revision
+     *            should possibly be included in the audit – created from either
+     *            a {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating the {@link Timestamp} of each change
+     *         to the respective description of the change
      */
     public abstract Map<Timestamp, String> audit(String key, long record,
             Timestamp start);
 
     /**
-     * List all the changes made to the {@code key} field in {@code record}
-     * between {@code start} (inclusive) and {@code end} (non-inclusive).
+     * Return a list of all the changes made to the {@code key} field in
+     * {@code record} between {@code start} (inclusive) and {@code end}
+     * (non-inclusive).
      * 
      * @param key the field name
      * @param record the record id
      * @param start an inclusive {@link Timestamp} for the oldest change that
-     *            should possibly be included in the audit
+     *            should possibly be included in the audit – created from either
+     *            a {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
      * @param end a non-inclusive {@link Timestamp} for the most recent change
-     *            that should possibly be included in the audit
-     * @return for each change, a mapping from timestamp to a description of the
-     *         revision
+     *            that should possibly be included in the audit – created from
+     *            either a {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating the {@link Timestamp} of each change
+     *         to the respective description of the change
      */
     public abstract Map<Timestamp, String> audit(String key, long record,
             Timestamp start, Timestamp end);
 
     /**
-     * View the values from all records that are currently stored for each of
-     * the {@code keys}.
+     * Return a view of the values from all records that are currently stored
+     * for each of the {@code keys}.
      * 
      * @param keys a collection of field names
-     * @return a {@link Map} associating each key to a {@link Map} associating
-     *         each value to the {@link Set} of records that contain that value
-     *         in the {@code key} field
+     * @return a {@link Map} associating each of the {@code keys} to a
+     *         another {@link Map} associating each indexed value to the
+     *         {@link Set} of records that contain that value in the {@code key}
+     *         field
      */
     public abstract Map<String, Map<Object, Set<Long>>> browse(
             Collection<String> keys);
 
     /**
-     * View the values from all records that were stored for each of the
-     * {@code keys} at {@code timestamp}.
+     * Return a view of the values from all records that were stored for each of
+     * the {@code keys} at {@code timestamp}.
      * 
      * @param keys a collection of field names
-     * @param timestamp the historical timestamp to use in the lookup
-     * @return a {@link Map} associating each key to a {@link Map} associating
-     *         each value to the {@link Set} of records that contained that
-     *         value in the {@code key} field at {@code timestamp}
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the {@code keys} to a
+     *         another {@link Map} associating each indexed value to the
+     *         {@link Set} of records that contained that value in the
+     *         {@code key} field at {@code timestamp}
      */
     public abstract Map<String, Map<Object, Set<Long>>> browse(
             Collection<String> keys, Timestamp timestamp);
 
     /**
-     * View the values from all records that are currently stored for
-     * {@code key}.
+     * Return a view of the values from all records that are currently stored
+     * for {@code key}.
      * 
      * @param key the field name
-     * @return a {@link Map} associating each value to the {@link Set} of
-     *         records that contain that value in the {@code key} field
+     * @return a {@link Map} associating each indexed value to the {@link Set}
+     *         of records that contain that value in the {@code key} field
      */
     public abstract Map<Object, Set<Long>> browse(String key);
 
     /**
-     * View the values from all records that were stored for {@code key} at
-     * {@code timestamp}.
+     * Return a view of the values from all records that were stored for
+     * {@code key} at {@code timestamp}.
      * 
      * @param key the field name
-     * @param timestamp the historical timestamp to use in the lookup
-     * @return a {@link Map} associating each value to the {@link Set} of
-     *         records that contained that value in the {@code key} field at
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each indexed value to the {@link Set}
+     *         of records that contained that value in the {@code key} field at
      *         {@code timestamp}
      */
     public abstract Map<Object, Set<Long>> browse(String key,
             Timestamp timestamp);
 
     /**
-     * View a time series that associates the timestamp of each modification for
-     * {@code key} in {@code record} to a snapshot containing the values that
-     * were stored in the field after the change.
+     * Return a time series that contains a snapshot of the values stored for
+     * {@code key} in {@code record} after every change made to the field.
      * 
      * @param key the field name
      * @param record the record id
-     * @return a {@link Map} associating each modification timestamp to the
-     *         {@link Set} of values that were stored in the field after the
-     *         change.
+     * @return a {@link Map} associating the {@link Timestamp} of each change to
+     *         the {@link Set} of values that were stored in the field after
+     *         that change
      */
     public abstract Map<Timestamp, Set<Object>> chronologize(String key,
             long record);
 
     /**
-     * View a time series between {@code start} (inclusive) and the present that
-     * associates the timestamp of each modification for {@code key} in
-     * {@code record} to a snapshot containing the values that
-     * were stored in the field after the change.
+     * Return a time series between {@code start} (inclusive) and the present
+     * that contains a snapshot of the values stored for {@code key} in
+     * {@code record} after every change made to the field during the time span.
      * 
      * @param key the field name
      * @param record the record id
      * @param start the first possible {@link Timestamp} to include in the
-     *            time series
-     * @return a {@link Map} associating each modification timestamp to the
-     *         {@link Set} of values that were stored in the field after the
-     *         change.
+     *            time series – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating the {@link Timestamp} of each change to
+     *         the {@link Set} of values that were stored in the field after
+     *         that change
      */
     public abstract Map<Timestamp, Set<Object>> chronologize(String key,
             long record, Timestamp start);
 
     /**
-     * View a time series between {@code start} (inclusive) and {@code end}
-     * (non-inclusive) that associates the timestamp of each modification for
-     * {@code key} in {@code record} to a snapshot containing the values that
-     * were stored in the field after the change.
+     * Return a time series between {@code start} (inclusive) and {@code end}
+     * (non-inclusive) that contains a snapshot of the values stored for
+     * {@code key} in {@code record} after every change made to the field during
+     * the time span.
      * 
      * @param key the field name
      * @param record the record id
      * @param start the first possible {@link Timestamp} to include in the
-     *            time series
+     *            time series – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
      * @param end the {@link Timestamp} that should be greater than every
-     *            timestamp in the time series
-     * @return a {@link Map} associating each modification timestamp to the
-     *         {@link Set} of values that were stored in the field after the
-     *         change.
+     *            timestamp in the time series – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating the {@link Timestamp} of each change to
+     *         the {@link Set} of values that were stored in the field after
+     *         that change
      */
     public abstract Map<Timestamp, Set<Object>> chronologize(String key,
             long record, Timestamp start, Timestamp end);
@@ -474,29 +552,36 @@ public abstract class Concourse implements AutoCloseable {
     public abstract boolean commit();
 
     /**
-     * For each of the {@code records}, list all of the keys that have at least
-     * one value.
+     * For each of the {@code records}, return all of the keys that have at
+     * least one value.
      * 
      * @param records a collection of record ids
-     * @return a {@link Map} associating each record id to the {@link Set} of
-     *         keys in that record
+     * @return a {@link Map} associating each of the {@code records} to the
+     *         {@link Set} of keys in that record
      */
     public abstract Map<Long, Set<String>> describe(Collection<Long> records);
 
     /**
-     * For each of the {@code records}, list all the keys that had at least one
-     * value at {@code timestamp}.
+     * For each of the {@code records}, return all the keys that had at least
+     * one value at {@code timestamp}.
      * 
      * @param records a collection of record ids
-     * @param timestamp the historical timestamp to use in the lookup
-     * @return a {@link Map} associating each record id to the {@link Set} of
-     *         keys that were in that record at {@code timestamp}
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the {@code records} to the
+     *         {@link Set} of keys that were in that record at {@code timestamp}
      */
     public abstract Map<Long, Set<String>> describe(Collection<Long> records,
             Timestamp timestamp);
 
     /**
-     * List all the keys in {@code record} that have at least one value.
+     * Return all the keys in {@code record} that have at least one value.
      * 
      * @param record the record id
      * @return the {@link Set} of keys in {@code record}
@@ -504,28 +589,41 @@ public abstract class Concourse implements AutoCloseable {
     public abstract Set<String> describe(long record);
 
     /**
-     * List all the keys in {@code record} that had at least one value at
+     * Return all the keys in {@code record} that had at least one value at
      * {@code timestamp}.
      * 
      * @param record the record id
-     * @param timestamp the historical timestamp to use in the lookup
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
      * @return the {@link Set} of keys that were in {@code record} at
      *         {@code timestamp}
      */
     public abstract Set<String> describe(long record, Timestamp timestamp);
 
     /**
-     * List the net changes made to {@code record} since {@code start}.
+     * Return the <em>net</em> changes made to {@code record} since
+     * {@code start}.
      * <p>
      * If you begin with the state of the {@code record} at {@code start} and
      * re-apply all the changes in the diff, you'll re-create the state of the
-     * same {@code record} at the present.
+     * {@code record} at the present.
+     * </p>
+     * <p>
+     * Unlike the {@link #audit(long, Timestamp) audit} method,
+     * {@link #diff(long, Timestamp) diff} does not necessarily reflect ALL the
+     * changes made to {@code record} during the time span.
      * </p>
      * 
      * @param record the record id
      * @param start the base timestamp from which the diff is calculated
-     * @return a {@link Map} that associates each key in the {@code record} to
-     *         another {@link Map} that associates a {@link Diff change
+     * @return a {@link Map} associating each key in the {@code record} to
+     *         another {@link Map} associating a {@link Diff change
      *         description} to the {@link Set} of values that fit the
      *         description (i.e. <code>
      *         {"key": {ADDED: ["value1", "value2"], REMOVED: ["value3", "value4"]}}
@@ -535,20 +633,24 @@ public abstract class Concourse implements AutoCloseable {
             Timestamp start);
 
     /**
-     * List the net changes made to {@code record} from {@code start} to
-     * {@code end}.
-     *
+     * Return the <em>net</em> changes made to {@code record} from {@code start}
+     * to {@code end}.
      * <p>
      * If you begin with the state of the {@code record} at {@code start} and
      * re-apply all the changes in the diff, you'll re-create the state of the
      * same {@code record} at {@code end}.
      * </p>
+     * <p>
+     * Unlike the {@link #audit(long, Timestamp, Timestamp) audit} method,
+     * {@link #diff(long, Timestamp) diff} does not necessarily reflect ALL the
+     * changes made to {@code record} during the time span.
+     * </p>
      * 
      * @param record the record id
      * @param start the base timestamp from which the diff is calculated
      * @param end the comparison timestamp to which the diff is calculated
-     * @return a {@link Map} that associates each key in the {@code record} to
-     *         another {@link Map} that associates a {@link Diff change
+     * @return a {@link Map} associating each key in the {@code record} to
+     *         another {@link Map} associating a {@link Diff change
      *         description} to the {@link Set} of values that fit the
      *         description (i.e. <code>
      *         {"key": {ADDED: ["value1", "value2"], REMOVED: ["value3", "value4"]}}
@@ -560,7 +662,6 @@ public abstract class Concourse implements AutoCloseable {
     /**
      * List the net changes made to {@code key} in {@code record} since
      * {@code start}.
-     * 
      * <p>
      * If you begin with the state of the field at {@code start} and re-apply
      * all the changes in the diff, you'll re-create the state of the same field
@@ -570,7 +671,7 @@ public abstract class Concourse implements AutoCloseable {
      * @param key the field name
      * @param record the record id
      * @param start the base timestamp from which the diff is calculated
-     * @return a {@link Map} that associates a {@link Diff change
+     * @return a {@link Map} associating a {@link Diff change
      *         description} to the {@link Set} of values that fit the
      *         description (i.e. <code>
      *         {ADDED: ["value1", "value2"], REMOVED: ["value3", "value4"]}
@@ -580,9 +681,8 @@ public abstract class Concourse implements AutoCloseable {
             Timestamp start);
 
     /**
-     * List the net changes made to {@code key} in {@code record} from
-     * {@code start} to {@code end}.
-     * 
+     * Return the <em>net</em> changes made to {@code key} in {@code record}
+     * from {@code start} to {@code end}.
      * <p>
      * If you begin with the state of the field at {@code start} and re-apply
      * all the changes in the diff, you'll re-create the state of the same field
@@ -593,7 +693,7 @@ public abstract class Concourse implements AutoCloseable {
      * @param record the record id
      * @param start the base timestamp from which the diff is calculated
      * @param end the comparison timestamp to which the diff is calculated
-     * @return a {@link Map} that associates a {@link Diff change
+     * @return a {@link Map} associating a {@link Diff change
      *         description} to the {@link Set} of values that fit the
      *         description (i.e. <code>
      *         {ADDED: ["value1", "value2"], REMOVED: ["value3", "value4"]}
@@ -603,18 +703,22 @@ public abstract class Concourse implements AutoCloseable {
             Timestamp start, Timestamp end);
 
     /**
-     * List the net changes made to the {@code key} field across all records
-     * since {@code start}.
-     * 
+     * Return the <em>net</em> changes made to the {@code key} field across all
+     * records since {@code start}.
      * <p>
      * If you begin with the state of the inverted index for {@code key} at
      * {@code start} and re-apply all the changes in the diff, you'll re-create
      * the state of the same index at the present.
      * </p>
+     * <p>
+     * Unlike the {@link #audit(String, long, Timestamp) audit} method,
+     * {@link #diff(long, Timestamp) diff} does not necessarily reflect ALL the
+     * changes made to {@code key} in {@code record} during the time span.
+     * </p>
      * 
      * @param key the field name
      * @param start the base timestamp from which the diff is calculated
-     * @return a {@link Map} that associates each value stored for {@code key}
+     * @return a {@link Map} associating each value stored for {@code key}
      *         across all records to another {@link Map} that associates a
      *         {@link Diff change description} to the {@link Set} of records
      *         where the description applies to that value in the {@code key}
@@ -626,19 +730,24 @@ public abstract class Concourse implements AutoCloseable {
             Timestamp start);
 
     /**
-     * List the net changes made to the {@code key} field across all records
-     * from {@code start} to {@code end}.
-     * 
+     * Return the <em>net</em> changes made to the {@code key} field across all
+     * records from {@code start} to {@code end}.
      * <p>
      * If you begin with the state of the inverted index for {@code key} at
      * {@code start} and re-apply all the changes in the diff, you'll re-create
      * the state of the same index at {@code end}.
      * </p>
+     * <p>
+     * Unlike the {@link #audit(String, long, Timestamp, Timestamp) audit}
+     * method, {@link #diff(long, Timestamp) diff} does not necessarily return
+     * ALL the changes made to {@code key} in {@code record} during the time
+     * span.
+     * </p>
      * 
      * @param key the field name
      * @param start the base timestamp from which the diff is calculated
      * @param end the comparison timestamp to which the diff is calculated
-     * @return a {@link Map} that associates each value stored for {@code key}
+     * @return a {@link Map} associating each value stored for {@code key}
      *         across all records to another {@link Map} that associates a
      *         {@link Diff change description} to the {@link Set} of records
      *         where the description applies to that value in the {@code key}
@@ -655,19 +764,25 @@ public abstract class Concourse implements AutoCloseable {
     public abstract void exit();
 
     /**
-     * Find and return the set of records that satisfy the {@code criteria}.
-     * This is analogous to the SELECT action in SQL.
+     * Return the set of records that satisfy the {@link Criteria criteria}.
      * 
-     * @param criteria
+     * @param criteria a {@link Criteria} that contains a well-formed filter for
+     *            the desired records
      * @return the records that match the {@code criteria}
      */
     public abstract Set<Long> find(Criteria criteria);
 
     /**
-     * Find and return the set of records that satisfy the {@code criteria}.
-     * This is analogous to the SELECT action in SQL.
+     * Return the set of records that satisfy the {@code criteria}.
+     * <p>
+     * This method is syntactic sugar for {@link #find(Criteria)}. The only
+     * difference is that this method takes a in-process {@link Criteria}
+     * building sequence for convenience.
+     * </p>
      * 
-     * @param criteria
+     * @param criteria an in-process {@link Criteria} building sequence that
+     *            contains an {@link BuildableState#build() unfinalized},
+     *            but well-formed filter for the desired records
      * @return the records that match the {@code criteria}
      */
     public abstract Set<Long> find(Object criteria); // this method exists in
@@ -677,146 +792,229 @@ public abstract class Concourse implements AutoCloseable {
                                                      // the CriteriaBuilder
 
     /**
-     * Find and return the set of records that satisfy the {@code ccl} criteria.
+     * Return the set of records that satisfy the {@code ccl} filter.
      * 
-     * @param ccl
+     * @param ccl a well-formed criteria expressed using the Concourse Criteria
+     *            Language
      * @return the records that match the criteria
      */
     public abstract Set<Long> find(String ccl);
 
     /**
-     * Find and return the set of records where {@code key} is equal to
-     * {@code value}. This method is a shortcut for calling
+     * Return the set of records where {@code key} {@link Operator#EQUALS
+     * equals} {@code value}.
+     * <p>
+     * This method is a shortcut for calling
      * {@link #find(String, Operator, Object)} with {@link Operator#EQUALS}.
+     * </p>
      * 
-     * @param key
-     * @param value
-     * @return the records that match the criteria
+     * @param key the field name
+     * @param value the value that must exist in the {@code key} field for the
+     *            record to match
+     * @return the records where {@code key} = {@code value}
      */
     public abstract Set<Long> find(String key, Object value);
 
     /**
-     * Find {@code key} {@code operator} {@code value} and return the set of
-     * records that satisfy the criteria. This is analogous to the SELECT action
-     * in SQL.
+     * Return the set of records where {@code key} was {@link Operator#EQUALS
+     * equal} to {@code value} at {@code timestamp}.
+     * <p>
+     * This method is a shortcut for calling
+     * {@link #find(String, Operator, Object, Timestamp)} with
+     * {@link Operator#EQUALS}.
+     * </p>
      * 
-     * @param key
-     * @param operator
-     * @param value
+     * @param key the field name
+     * @param value the value that must exist in the {@code key} field for the
+     *            record to match
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use when checking for matches – created from either
+     *            a {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return the records where {@code key} was equal to {@code value} at
+     *         {@code timestamp}
+     */
+    public abstract Set<Long> find(String key, Object value, Timestamp timestamp);
+
+    /**
+     * Return the set of {@code records} where the {@code key} field contains at
+     * least one value that satisfies the {@code operator} in relation to the
+     * {@code value}.
+     * 
+     * @param key the field name
+     * @param operator the {@link Operator} to use when comparing the specified
+     *            {@code value} to those stored across the {@code key} field
+     *            while determining which records are matches
+     * @param value the comparison value for the {@code operator}
      * @return the records that match the criteria
      */
     public abstract Set<Long> find(String key, Operator operator, Object value);
 
     /**
-     * Find {@code key} {@code operator} {@code value} and {@code value2} and
-     * return the set of records that satisfy the criteria. This is analogous to
-     * the SELECT action in SQL.
+     * Return the set of {@code records} where the {@code key} field contains at
+     * least one value that satisfies the {@code operator} in relation to
+     * {@code value} and {@code value2}.
      * 
-     * @param key
-     * @param operator
-     * @param value
-     * @param value2
+     * @param key the field name
+     * @param operator the {@link Operator} to use when comparing the specified
+     *            values to those stored across the {@code key} field while
+     *            determining which records are matches
+     * @param value the first comparison value for the {@code operator}
+     * @param value2 the second comparison value for the {@code operator}
      * @return the records that match the criteria
      */
     public abstract Set<Long> find(String key, Operator operator, Object value,
             Object value2);
 
     /**
-     * Find {@code key} {@code operator} {@code value} and {@code value2} at
-     * {@code timestamp} and return the set of records that satisfy the
-     * criteria. This is analogous to the SELECT action in SQL.
+     * Return the set of {@code records} where the {@code key} field contained
+     * at least one value at {@code timestamp} that satisfies the
+     * {@code operator} in relation to {@code value} and {@code value2}.
      * 
-     * @param key
-     * @param operator
-     * @param value
-     * @param value2
-     * @param timestamp
+     * @param key the field name
+     * @param operator the {@link Operator} to use when comparing the specified
+     *            values to those stored across the {@code key} field while
+     *            determining which records are matches
+     * @param value the first comparison value for the {@code operator}
+     * @param value2 the second comparison value for the {@code operator}
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use when checking for matches – created from either
+     *            a {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
      * @return the records that match the criteria
      */
     public abstract Set<Long> find(String key, Operator operator, Object value,
             Object value2, Timestamp timestamp);
 
     /**
-     * Find {@code key} {@code operator} {@code value} at {@code timestamp} and
-     * return the set of records that satisfy the criteria. This is analogous to
-     * the SELECT action in SQL.
+     * Return the set of {@code records} where the {@code key} field contained
+     * at least one value at {@timestamp} that satisfies the {@code operator} in
+     * relation to the {@code value}.
      * 
-     * @param key
-     * @param operator
-     * @param value
+     * @param key the field name
+     * @param operator the {@link Operator} to use when comparing the specified
+     *            {@code value} to those stored across the {@code key} field
+     *            while determining which records are matches
+     * @param value the comparison value for the {@code operator}
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use when checking for matches – created from either
+     *            a {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
      * @return the records that match the criteria
      */
     public abstract Set<Long> find(String key, Operator operator, Object value,
             Timestamp timestamp);
 
     /**
-     * Find {@code key} {@code operator} {@code value} and return the set of
-     * records that satisfy the criteria. This is analogous to the SELECT action
-     * in SQL.
+     * Return the set of {@code records} where the {@code key} field contains at
+     * least one value that satisfies the {@code operator} in relation to the
+     * {@code value}.
      * 
-     * @param key
-     * @param operator
-     * @param value
+     * @param key the field name
+     * @param operator a valid {@link Convert#stringToOperator(String)
+     *            description} of an {@link Operator} to use when comparing the
+     *            specified {@code value} to those stored across the {@code key}
+     *            field while determining which records are matches
+     * @param value the comparison value for the {@code operator}
      * @return the records that match the criteria
      */
     public abstract Set<Long> find(String key, String operator, Object value);
 
     /**
-     * Find {@code key} {@code operator} {@code value} and {@code value2} and
-     * return the set of records that satisfy the criteria. This is analogous to
-     * the SELECT action in SQL.
+     * Return the set of {@code records} where the {@code key} field contains at
+     * least one value that satisfies the {@code operator} in relation to
+     * {@code value} and {@code value2}.
      * 
-     * @param key
-     * @param operator
-     * @param value
-     * @param value2
+     * @param key the field name
+     * @param operator a valid {@link Convert#stringToOperator(String)
+     *            description} of an {@link Operator} to use when comparing the
+     *            specified {@code value} to those stored across the {@code key}
+     *            field while determining which records are matches
+     * @param value the first comparison value for the {@code operator}
+     * @param value2 the second comparison value for the {@code operator}
      * @return the records that match the criteria
      */
     public abstract Set<Long> find(String key, String operator, Object value,
             Object value2);
 
     /**
-     * Find {@code key} {@code operator} {@code value} and {@code value2} at
-     * {@code timestamp} and return the set of records that satisfy the
-     * criteria. This is analogous to the SELECT action in SQL.
+     * Return the set of {@code records} where the {@code key} field contained
+     * at least one value at {@code timestamp} that satisfies the
+     * {@code operator} in relation to {@code value} and {@code value2}.
      * 
-     * @param key
-     * @param operator
-     * @param value
-     * @param value2
-     * @param timestamp
+     * @param key the field name
+     * @param operator a valid {@link Convert#stringToOperator(String)
+     *            description} of an {@link Operator} to use when comparing the
+     *            specified {@code value} to those stored across the {@code key}
+     *            field while determining which records are matches
+     * @param value the first comparison value for the {@code operator}
+     * @param value2 the second comparison value for the {@code operator}
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use when checking for matches – created from either
+     *            a {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
      * @return the records that match the criteria
      */
     public abstract Set<Long> find(String key, String operator, Object value,
             Object value2, Timestamp timestamp);
 
     /**
-     * Find {@code key} {@code operator} {@code value} at {@code timestamp} and
-     * return the set of records that satisfy the criteria. This is analogous to
-     * the SELECT action in SQL.
+     * Return the set of {@code records} where the {@code key} field contained
+     * at least one value at {@code timestamp} that satisfies the
+     * {@code operator} in relation to the {@code value}.
      * 
-     * @param key
-     * @param operator
-     * @param value
+     * @param key the field name
+     * @param operator a valid {@link Convert#stringToOperator(String)
+     *            description} of an {@link Operator} to use when comparing the
+     *            specified {@code value} to those stored across the {@code key}
+     *            field while determining which records are matches
+     * @param value the comparison value for the {@code operator}
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use when checking for matches – created from either
+     *            a {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
      * @return the records that match the criteria
      */
     public abstract Set<Long> find(String key, String operator, Object value,
             Timestamp timestamp);
 
     /**
-     * Find and return the unique record where {@code key}
-     * {@link Operator#EQUALS
-     * equals} {@code value}, if if exists. If no record matches, then add
-     * {@code key} as {@code value} into an new record and return the id
-     * 
+     * Return the unique record where {@code key} {@link Operator#EQUALS equals}
+     * {@code value}, or throw a {@link DuplicateEntryException} if multiple
+     * records match the condition. If no record matches,
+     * {@link #add(String, Object) add} {@code key} as {@code value} into an new
+     * record and return the id.
      * <p>
      * This method can be used to simulate a unique index because it atomically
      * checks for a condition and only adds data if that condition isn't
      * currently satisfied.
      * </p>
      * 
-     * @param key
-     * @param value
+     * @param key the field name
+     * @param value the value that must exist in the {@code key} field of a
+     *            single record for that record to match or the value that is
+     *            added to the {@code key} field in a new record if no existing
+     *            record matches the condition
      * @return the unique record where {@code key} = {@code value}, if one exist
      *         or the record where the {@code key} as {@code value} is added
      * @throws DuplicateEntryException
@@ -825,10 +1023,10 @@ public abstract class Concourse implements AutoCloseable {
             throws DuplicateEntryException;
 
     /**
-     * Find and return the unique record that matches the {@code criteria}, if
-     * one exist. If and only if no record matches, insert the key/value
-     * associations in {@code data} into a new record and return the id.
-     * 
+     * Return the unique record that matches the {@code criteria}, if
+     * one exist or throw a {@link DuplicateEntryException} if multiple records
+     * match. If no record matches, {@link #insert(Map)} the {@code data} into a
+     * new record and return the id.
      * <p>
      * This method can be used to simulate a unique index because it atomically
      * checks for a condition and only inserts data if that condition isn't
@@ -838,10 +1036,15 @@ public abstract class Concourse implements AutoCloseable {
      * Each of the values in {@code data} must be a primitive or one dimensional
      * object (e.g. no nested {@link Map maps} or {@link Multimap multimaps}).
      * </p>
+     * <p>
+     * This method is syntactic sugar for {@link #findOrInsert(Criteria, Map)}.
+     * The only difference is that this method takes a in-process
+     * {@link Criteria} building sequence for convenience.
+     * </p>
      * 
-     * @param criteria A {@link Criteria} builder sequence that has reached a
-     *            buildable state, but that has not be officially
-     *            {@link BuildableState#build() built}.
+     * @param criteria an in-process {@link Criteria} building sequence that
+     *            contains an {@link BuildableState#build() unfinalized},
+     *            but well-formed filter for the desired record
      * @param data a {@link Map} with key/value associations to insert into the
      *            new record
      * @return the unique record that matches {@code criteria}, if one exist
@@ -855,10 +1058,10 @@ public abstract class Concourse implements AutoCloseable {
     }
 
     /**
-     * Find and return the unique record that matches the {@code criteria}, if
-     * one exist. If and only if no record matches, insert the key/value
-     * associations in {@code data} into a new record and return the id.
-     * 
+     * Return the unique record that matches the {@code criteria}, if one exist
+     * or throw a {@link DuplicateEntryException} if multiple records match. If
+     * no record matches, {@link #insert(Multimap)} the {@code data} into a new
+     * record and return the id.
      * <p>
      * This method can be used to simulate a unique index because it atomically
      * checks for a condition and only inserts data if that condition isn't
@@ -868,10 +1071,17 @@ public abstract class Concourse implements AutoCloseable {
      * Each of the values in {@code data} must be a primitive or one dimensional
      * object (e.g. no nested {@link Map maps} or {@link Multimap multimaps}).
      * </p>
+     * <p>
+     * This method is syntactic sugar for
+     * {@link #findOrInsert(Criteria, Multimap)}. The only difference is that
+     * this method takes a in-process {@link Criteria} building sequence for
+     * convenience.
+     * </p>
      * 
-     * @param criteria A {@link Criteria} builder sequence that has reached a
-     *            buildable state, but that has not be officially
-     *            {@link BuildableState#build() built}.
+     * @param criteria an in-process {@link Criteria} building sequence that
+     *            contains an {@link BuildableState#build() unfinalized},
+     *            but well-formed filter for the desired
+     *            record
      * @param data a {@link Multimap} with key/value associations to insert into
      *            the new record
      * @return the unique record that matches {@code criteria}, if one exist
@@ -885,19 +1095,26 @@ public abstract class Concourse implements AutoCloseable {
     }
 
     /**
-     * Find and return the unique record that matches the {@code ccl} string, if
-     * one exist. If no records match, then insert the data in the {@code json}
-     * string a new record and return the id.
-     * 
+     * Return the unique record that matches the {@code criteria}, if one exist
+     * or throw a {@link DuplicateEntryException} if multiple records match. If
+     * no record matches, {@link #insert(String)} the {@code json} into a new
+     * record and return the id.
      * <p>
      * This method can be used to simulate a unique index because it atomically
      * checks for a condition and only inserts data if that condition isn't
      * currently satisfied.
      * </p>
+     * <p>
+     * This method is syntactic sugar for
+     * {@link #findOrInsert(Criteria, String)}. The only difference is that this
+     * method takes a in-process {@link Criteria} building sequence for
+     * convenience.
+     * </p>
      * 
-     * @param criteria A {@link Criteria} builder sequence that has reached a
-     *            buildable state, but that has not be officially
-     *            {@link BuildableState#build() built}.
+     * @param criteria an in-process {@link Criteria} building sequence that
+     *            contains an {@link BuildableState#build() unfinalized},
+     *            but well-formed filter for the desired
+     *            record
      * @param json a JSON blob describing a single object
      * @return the unique record that matches {@code criteria}, if one exist
      *         or the record where the {@code json} data is inserted
@@ -909,10 +1126,10 @@ public abstract class Concourse implements AutoCloseable {
     }
 
     /**
-     * Find and return the unique record that matches the {@code criteria}, if
-     * one exist. If and only if no record matches, insert the key/value
-     * associations in {@code data} into a new record and return the id.
-     * 
+     * Return the unique record that matches the {@code criteria}, if one exist
+     * or throw a {@link DuplicateEntryException} if multiple records match. If
+     * no record matches, {@link #insert(Map)} the {@code data} into a
+     * new record and return the id.
      * <p>
      * This method can be used to simulate a unique index because it atomically
      * checks for a condition and only inserts data if that condition isn't
@@ -923,7 +1140,8 @@ public abstract class Concourse implements AutoCloseable {
      * object (e.g. no nested {@link Map maps} or {@link Multimap multimaps}).
      * </p>
      * 
-     * @param criteria a well formed {@link Criteria}
+     * @param criteria a {@link Criteria} that contains a well-formed filter for
+     *            the desired record
      * @param data a {@link Map} with key/value associations to insert into the
      *            new record
      * @return the unique record that matches {@code criteria}, if one exist
@@ -937,10 +1155,10 @@ public abstract class Concourse implements AutoCloseable {
     }
 
     /**
-     * Find and return the unique record that matches the {@code criteria}, if
-     * one exist. If and only if no record matches, insert the key/value
-     * associations in {@code data} into a new record and return the id.
-     * 
+     * Return the unique record that matches the {@code criteria}, if one exist
+     * or throw a {@link DuplicateEntryException} if multiple records match. If
+     * no record matches, {@link #insert(Multimap)} the {@code data} into a new
+     * record and return the id.
      * <p>
      * This method can be used to simulate a unique index because it atomically
      * checks for a condition and only inserts data if that condition isn't
@@ -951,7 +1169,8 @@ public abstract class Concourse implements AutoCloseable {
      * object (e.g. no nested {@link Map maps} or {@link Multimap multimaps}).
      * </p>
      * 
-     * @param criteria a well formed {@link Criteria}
+     * @param criteria a {@link Criteria} that contains a well-formed filter for
+     *            the desired record
      * @param data a {@link Multimap} with key/value associations to insert into
      *            the new record
      * @return the unique record that matches {@code criteria}, if one exist
@@ -965,19 +1184,18 @@ public abstract class Concourse implements AutoCloseable {
     }
 
     /**
-     * Find and return the unique record that matches the {@code ccl} string, if
-     * one exist. If no records match, then insert the data in the {@code json}
-     * string a new record and return the id.
-     * 
+     * Return the unique record that matches the {@code criteria}, if one exist
+     * or throw a {@link DuplicateEntryException} if multiple records match. If
+     * no record matches, {@link #insert(String)} the {@code json} into a new
+     * record and return the id.
      * <p>
      * This method can be used to simulate a unique index because it atomically
      * checks for a condition and only inserts data if that condition isn't
      * currently satisfied.
      * </p>
      * 
-     * @param criteria A {@link Criteria} builder sequence that has reached a
-     *            buildable state, but that has not be officially
-     *            {@link BuildableState#build() built}.
+     * @param criteria a {@link Criteria} that contains a well-formed filter for
+     *            the desired record
      * @param data a JSON blob describing a single object
      * @return the unique record that matches {@code criteria}, if one exist
      *         or the record where the {@code json} data is inserted
@@ -987,10 +1205,10 @@ public abstract class Concourse implements AutoCloseable {
             throws DuplicateEntryException;
 
     /**
-     * Find and return the unique record that matches the {@code ccl} criteria,
-     * if one exist. If and only if no record matches, insert the key/value
-     * associations in {@code data} into a new record and return the id.
-     * 
+     * Return the unique record that matches the {@code ccl} filter, if one
+     * exist or throw a {@link DuplicateEntryException} if multiple records
+     * match. If no record matches, {@link #insert(Map)} the {@code data} into a
+     * new record and return the id.
      * <p>
      * This method can be used to simulate a unique index because it atomically
      * checks for a condition and only inserts data if that condition isn't
@@ -1001,7 +1219,8 @@ public abstract class Concourse implements AutoCloseable {
      * object (e.g. no nested {@link Map maps} or {@link Multimap multimaps}).
      * </p>
      * 
-     * @param ccl the well formed criteria expressed using CCL
+     * @param ccl a well-formed criteria expressed using the Concourse Criteria
+     *            Language
      * @param data a {@link Map} with key/value associations to insert into the
      *            new record
      * @return the unique record that matches {@code criteria}, if one exist
@@ -1015,10 +1234,10 @@ public abstract class Concourse implements AutoCloseable {
     }
 
     /**
-     * Find and return the unique record that matches the {@code ccl} criteria,
-     * if one exist. If and only if no record matches, insert the key/value
-     * associations in {@code data} into a new record and return the id.
-     * 
+     * Return the unique record that matches the {@code ccl} filter, if one
+     * exist or throw a {@link DuplicateEntryException} if multiple records
+     * match. If no record matches, {@link #insert(Multimap)} the {@code data}
+     * into a new record and return the id.
      * <p>
      * This method can be used to simulate a unique index because it atomically
      * checks for a condition and only inserts data if that condition isn't
@@ -1029,7 +1248,8 @@ public abstract class Concourse implements AutoCloseable {
      * object (e.g. no nested {@link Map maps} or {@link Multimap multimaps}).
      * </p>
      * 
-     * @param ccl the well formed criteria expressed using CCL
+     * @param ccl a well-formed criteria expressed using the Concourse Criteria
+     *            Language
      * @param data a {@link Multimap} with key/value associations to insert into
      *            the new record
      * @return the unique record that matches {@code criteria}, if one exist
@@ -1043,17 +1263,18 @@ public abstract class Concourse implements AutoCloseable {
     }
 
     /**
-     * Find and return the unique record that matches the {@code ccl} string, if
-     * one exist. If no records match, then insert the data in the {@code json}
-     * string a new record and return the id.
-     * 
+     * Return the unique record that matches the {@code ccl} filter, if one
+     * exist or throw a {@link DuplicateEntryException} if multiple records
+     * match. If no record matches, {@link #insert(String)} the {@code json}
+     * into a new record and return the id.
      * <p>
      * This method can be used to simulate a unique index because it atomically
      * checks for a condition and only inserts data if that condition isn't
      * currently satisfied.
      * </p>
      * 
-     * @param ccl the criteria expressed using CCL
+     * @param ccl a well-formed criteria expressed using the Concourse Criteria
+     *            Language
      * @param json a JSON blob describing a single object
      * @return the unique record that matches {@code ccl} string, if one exist
      *         or the record where the {@code json} data is inserted
@@ -1063,328 +1284,509 @@ public abstract class Concourse implements AutoCloseable {
             throws DuplicateEntryException;
 
     /**
-     * Get each of the {@code keys} from each of the {@code records} and return
-     * a mapping from each record to a mapping of each key to the first
-     * contained value.
+     * For each of the {@code keys} in each of the {@code records}, return the
+     * stored value that was most recently added.
      * 
-     * @param keys
-     * @param records
-     * @return the first contained value for each of the {@code keys} in each of
-     *         the {@code records}
+     * @param keys a collection of field names
+     * @param records a collection of record ids
+     * @return a {@link Map} associating each of the {@code records} to another
+     *         {@link Map} associating each of the {@code keys} to the freshest
+     *         value in the field
      */
-    @CompoundOperation
     public abstract <T> Map<Long, Map<String, T>> get(Collection<String> keys,
             Collection<Long> records);
 
     /**
-     * Get each of the {@code keys} from each of the {@code records} at
-     * {@code timestamp} and return a mapping from each record to a mapping of
-     * each key to the first contained value.
+     * For each of the {@code keys} in each of the {@code records}, return the
+     * stored value that was most recently added at {@code timestamp}.
      * 
-     * @param keys
-     * @param records
-     * @param timestamp
-     * @return the first contained value for each of the {@code keys} in each of
-     *         the {@code records} at {@code timestamp}
+     * @param keys a collection of field names
+     * @param records a collection of record ids
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the {@code records} to another
+     *         {@link Map} associating each of the {@code keys} to the freshest
+     *         value in the field at {@code timestamp}
      */
-    @CompoundOperation
     public abstract <T> Map<Long, Map<String, T>> get(Collection<String> keys,
             Collection<Long> records, Timestamp timestamp);
 
     /**
-     * Get the most recently added value for each of the {@code keys} in all the
-     * records that match {@code criteria}.
+     * For each of the {@code keys} in every record that matches the
+     * {@code criteria}, return the stored value that was most recently
+     * added.
      * 
-     * @param keys
-     * @param criteria
-     * @return the result set
+     * @param keys a collection of field names
+     * @param criteria a {@link Criteria} that contains a well-formed filter for
+     *            the desired records
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the {@code keys} to the freshest
+     *         value in the field
      */
     public abstract <T> Map<Long, Map<String, T>> get(Collection<String> keys,
             Criteria criteria);
 
     /**
-     * Get the most recently added value for each of the {@code keys} at
-     * {@code timestamp} in all the records that match {@code criteria}.
+     * For each of the {@code keys} in every record that matches the
+     * {@code criteria}, return the stored value that was most recently
+     * added at {@code timestamp}.
      * 
-     * @param keys
-     * @param criteria
-     * @param timestamp
-     * @return the result set
+     * @param keys a collection of field names
+     * @param criteria a {@link Criteria} that contains a well-formed filter for
+     *            the desired records
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the {@code keys} to the freshest
+     *         value in the field at {@code timestamp}
      */
     public abstract <T> Map<Long, Map<String, T>> get(Collection<String> keys,
             Criteria criteria, Timestamp timestamp);
 
     /**
-     * Get each of the {@code keys} from {@code record} and return a mapping
-     * from each key to the first contained value.
+     * For each of the {@code keys} in {@code record}, return the stored value
+     * that was most recently added.
      * 
-     * @param keys
-     * @param record
-     * @return the first contained value for each of the {@code keys} in
-     *         {@code record}
+     * @param keys a collection of field names
+     * @param record the record id
+     * @return a {@link Map} associating each of the {@code keys} to the
+     *         freshest value in the field
      */
-    @CompoundOperation
     public abstract <T> Map<String, T> get(Collection<String> keys, long record);
 
     /**
-     * Get each of the {@code keys} from {@code record} at {@code timestamp} and
-     * return a mapping from each key to the first contained value.
+     * For each of the {@code keys} in {@code record}, return the stored value
+     * that was most recently added at {@code timestamp}.
      * 
-     * @param keys
-     * @param record
-     * @param timestamp
-     * @return the first contained value for each of the {@code keys} in
-     *         {@code record} at {@code timestamp}
+     * @param keys a collection of field names
+     * @param record the record id
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the {@code keys} to the
+     *         freshest
+     *         value in the field at {@code timestamp}
      */
-    @CompoundOperation
     public abstract <T> Map<String, T> get(Collection<String> keys,
             long record, Timestamp timestamp);
 
     /**
-     * Get the most recently added value for each of the {@code keys} in all the
-     * records that match {@code criteria}.
+     * For each of the {@code keys} in every record that matches the
+     * {@code criteria}, return the stored value that was most recently
+     * added.
+     * <p>
+     * This method is syntactic sugar for {@link #get(Collection, Criteria)}.
+     * The only difference is that this method takes a in-process
+     * {@link Criteria} building sequence for convenience.
+     * </p>
      * 
-     * @param keys
-     * @param criteria
-     * @return the result set
+     * @param keys a collection of field names
+     * @param criteria an in-process {@link Criteria} building sequence that
+     *            contains an {@link BuildableState#build() unfinalized},
+     *            but well-formed filter for the desired
+     *            records
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the {@code keys} to the freshest
+     *         value in the field
      */
     public abstract <T> Map<Long, Map<String, T>> get(Collection<String> keys,
             Object criteria);
 
     /**
-     * Get the most recently added value for each of the {@code keys} at
-     * {@code timestamp} in all the records that match {@code criteria}.
+     * For each of the {@code keys} in every record that matches the
+     * {@code criteria}, return the stored value that was most recently
+     * added at {@code timestamp}.
+     * <p>
+     * This method is syntactic sugar for
+     * {@link #get(Collection, Criteria, Timestamp)}. The only difference is
+     * that this method takes a in-process {@link Criteria} building sequence
+     * for convenience.
+     * </p>
      * 
-     * @param keys
-     * @param criteria
-     * @param timestamp
-     * @return the result set
+     * @param keys a collection of field names
+     * @param criteria an in-process {@link Criteria} building sequence that
+     *            contains an {@link BuildableState#build() unfinalized},
+     *            but well-formed filter for the desired
+     *            records
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the {@code keys} to the freshest
+     *         value in the field at {@code timestamp}
      */
     public abstract <T> Map<Long, Map<String, T>> get(Collection<String> keys,
             Object criteria, Timestamp timestamp);
 
     /**
-     * Get the most recently added value for each of the {@code keys} in all the
-     * records that match {@code ccl} criteria.
+     * For each of the {@code keys} in every record that matches the {@code ccl}
+     * filter, return the stored value that was most recently added.
      * 
-     * @param keys
-     * @param ccl
-     * @return the result set
+     * @param keys a collection of field names
+     * @param ccl a well-formed criteria expressed using the Concourse Criteria
+     *            Language
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the {@code keys} to the freshest
+     *         value in the field
      */
     public abstract <T> Map<Long, Map<String, T>> get(Collection<String> keys,
             String ccl);
 
     /**
-     * Get the most recently added value for each of the {@code keys} at
-     * {@code timestamp} in all the records that match {@code ccl} criteria.
+     * For each of the {@code keys} in every record that matches the {@code ccl}
+     * filter, return the stored value that was most recently added at
+     * {@code timestamp}.
      * 
-     * @param keys
-     * @param ccl
-     * @param timestamp
-     * @return the result set
+     * @param keys a collection of field names
+     * @param ccl a well-formed criteria expressed using the Concourse Criteria
+     *            Language
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the {@code keys} to the freshest
+     *         value in the field at {@code timestamp}
      */
     public abstract <T> Map<Long, Map<String, T>> get(Collection<String> keys,
             String ccl, Timestamp timestamp);
 
     /**
-     * Get the most recently added values for each key in all of the records
-     * that match {@code criteria}.
+     * For every key in every record that matches the {@code criteria}, return
+     * the stored value that was most recently added.
      * 
-     * @param criteria
-     * @return the result set
+     * @param criteria a {@link Criteria} that contains a well-formed filter for
+     *            the desired records
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the record's keys to the freshest
+     *         value in the field
      */
     public abstract <T> Map<Long, Map<String, T>> get(Criteria criteria);
 
     /**
-     * Get the most recently added values at {@code timestamp} for each key in
-     * all of the records that match {@code criteria}.
+     * For every key in every record that matches the {@code criteria}, return
+     * the stored value that was most recently added at {@code timestamp} .
      * 
-     * @param criteria
-     * @param timestamp
-     * @return the result set
+     * @param criteria a {@link Criteria} that contains a well-formed filter for
+     *            the desired records
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the record's keys to the freshest
+     *         value in the field at {@code timestamp}
      */
     public abstract <T> Map<Long, Map<String, T>> get(Criteria criteria,
             Timestamp timestamp);
 
     /**
-     * Get the most recently added values for each key in all of the records
-     * that match {@code criteria}.
+     * For every key in every record that matches the {@code criteria}, return
+     * the stored value that was most recently added.
      * 
-     * @param criteria
-     * @return the result set
+     * @param criteria an in-process {@link Criteria} building sequence that
+     *            contains an {@link BuildableState#build() unfinalized},
+     *            but well-formed filter for the desired
+     *            records
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the record's keys to the freshest
+     *         value in the field
      */
     public abstract <T> Map<Long, Map<String, T>> get(Object criteria);
 
     /**
-     * Get the most recently added values at {@code timestamp} for each key in
-     * all of the records that match {@code criteria}.
+     * For every key in every record that matches the {@code criteria}, return
+     * the stored value that was most recently added at {@code timestamp}.
      * 
-     * @param criteria
-     * @param timestamp
-     * @return the result set
+     * @param criteria an in-process {@link Criteria} building sequence that
+     *            contains an {@link BuildableState#build() unfinalized},
+     *            but well-formed filter for the desired
+     *            records
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the record's keys to the freshest
+     *         value in the field at {@code timestamp}
      */
     public abstract <T> Map<Long, Map<String, T>> get(Object criteria,
             Timestamp timestamp);
 
     /**
-     * Get the most recently added values for each key in all of the records
-     * that match {@code ccl} criteria.
+     * For every key in every record that matches the {@code ccl} filter, return
+     * the stored value that was most recently added.
      * 
-     * @param ccl
-     * @return the result set
+     * @param ccl a well-formed criteria expressed using the Concourse Criteria
+     *            Language
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the record's keys to the freshest
+     *         value in the field
      */
     public abstract <T> Map<Long, Map<String, T>> get(String ccl);
 
     /**
-     * Get {@code key} from each of the {@code records} and return a mapping
-     * from each record to the first contained value.
+     * For each of the {@code records}, return the stored value in the
+     * {@code key} field that was most recently added.
      * 
-     * @param key
-     * @param records
-     * @return the first contained value for {@code key} in each of the
-     *         {@code records}
+     * @param key the field name
+     * @param records a collection of record ids
+     * @return a {@link Map} associating each of the {@code records} to the
+     *         freshest value in the {@code key} field
      */
-    @CompoundOperation
     public abstract <T> Map<Long, T> get(String key, Collection<Long> records);
 
     /**
-     * Get {@code key} from each of the {@code records} at {@code timestamp} and
-     * return a mapping from each record to the first contained value.
+     * For each of the {@code records}, return the stored value in the
+     * {@code key} field that was most recently added at {@code timestamp}
      * 
-     * @param key
-     * @param records
-     * @param timestamp
-     * @return the first contained value for {@code key} in each of the
-     *         {@code records} at {@code timestamp}
+     * @param key the field name
+     * @param records a collection of record ids
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the {@code records} to the
+     *         freshest value in the {@code key} field at {@code timestamp}
      */
-    @CompoundOperation
     public abstract <T> Map<Long, T> get(String key, Collection<Long> records,
             Timestamp timestamp);
 
     /**
-     * Get the most recently added value for {@code key} in all the records that
-     * match {@code criteria}.
+     * For every record that matches the {@code criteria}, return the stored
+     * value in the {@code key} field that was most recently added.
      * 
-     * @param key
-     * @param criteria
-     * @return the result set
+     * @param key the field name
+     * @param criteria a {@link Criteria} that contains a well-formed filter for
+     *            the desired records
+     * @return a {@link Map} associating each of the matching records to the
+     *         freshest value in the {@code key} field
      */
     public abstract <T> Map<Long, T> get(String key, Criteria criteria);
 
     /**
-     * Get the most recently added value for {@code key} at {@code timestamp}
-     * for all the records that match the {@code criteria}.
+     * For every record that matches the {@code criteria}, return the
+     * stored value in the {@code key} field that was most recently added at
+     * {@code timestamp}.
      * 
-     * @param key
-     * @param criteria
-     * @param timestamp
-     * @return the result set
+     * @param key the field name
+     * @param criteria a {@link Criteria} that contains a well-formed filter for
+     *            the desired records
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the matching records to the
+     *         freshest value in the {@code key} field
      */
     public abstract <T> Map<Long, T> get(String key, Criteria criteria,
             Timestamp timestamp);
 
     /**
-     * Get {@code key} from {@code record} and return the first contained value
-     * or {@code null} if there is none. Compared to
-     * {@link #select(String, long)}, this method is suited for cases when the
-     * caller is certain that {@code key} in {@code record} maps to a single
-     * value of type {@code T}.
+     * Return the stored value that was most recently added for {@code key} in
+     * {@code record}. If the field is empty, return {@code null}.
      * 
-     * @param key
-     * @param record
-     * @return the first contained value
+     * @param key the field name
+     * @param record the record id
+     * @return the freshest value in the field
      */
+    @Nullable
     public abstract <T> T get(String key, long record);
 
     /**
-     * Get {@code key} from {@code record} at {@code timestamp} and return the
-     * first contained value or {@code null} if there was none. Compared to
-     * {@link #select(String, long, Timestamp)}, this method is suited for cases
-     * when the caller is certain that {@code key} in {@code record} mapped to a
-     * single value of type {@code T} at {@code timestamp}.
+     * Return the stored value that was most recently added for {@code key} in
+     * {@code record} at {@code timestamp}. If the field was empty at
+     * {@code timestamp}, return {@code null}.
      * 
-     * @param key
-     * @param record
-     * @param timestamp
-     * @return the first contained value
+     * @param key the field name
+     * @param record the record id
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return the freshest value in the field at {@code timestamp}
      */
+    @Nullable
     public abstract <T> T get(String key, long record, Timestamp timestamp);
 
     /**
-     * Get the most recently added value for {@code key} in all the records that
-     * match {@code criteria}.
+     * For every record that matches the {@code criteria}, return the stored
+     * value in the {@code key} field that was most recently added.
+     * <p>
+     * This method is syntactic sugar for {@link #get(String, Criteria)}. The
+     * only difference is that this method takes a in-process {@link Criteria}
+     * building sequence for convenience.
+     * </p>
      * 
-     * @param key
-     * @param criteria
-     * @return the result set
+     * @param criteria an in-process {@link Criteria} building sequence that
+     *            contains an {@link BuildableState#build() unfinalized},
+     *            but well-formed filter for the desired
+     *            records
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the record's keys to the freshest
+     *         value in the field
      */
     public abstract <T> Map<Long, T> get(String key, Object criteria);
 
     /**
-     * Get the most recently added value for {@code key} at {@code timestamp}
-     * for all the records that match the {@code criteria}.
+     * For every record that matches the {@code criteria}, return the
+     * stored value in the {@code key} field that was most recently added at
+     * {@code timestamp}.
+     * <p>
+     * This method is syntactic sugar for
+     * {@link #get(String, Criteria, Timestamp)}. The only difference is that
+     * this method takes a in-process {@link Criteria} building sequence for
+     * convenience.
+     * </p>
      * 
-     * @param key
-     * @param criteria
-     * @param timestamp
-     * @return the result set
+     * @param key the field name
+     * @param criteria an in-process {@link Criteria} building sequence that
+     *            contains an {@link BuildableState#build() unfinalized},
+     *            but well-formed filter for the desired
+     *            records
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the matching records to the
+     *         freshest value in the {@code key} field
      */
     public abstract <T> Map<Long, T> get(String key, Object criteria,
             Timestamp timestamp);
 
     /**
-     * Get the most recently added value for {@code key} in all the records that
-     * match {@code ccl} criteria.
+     * For every record that matches the {@code ccl} filter, return the
+     * stored value in the {@code key} field that was most recently added.
+     * <p>
+     * This method is syntactic sugar for {@link #get(String, Criteria)}. The
+     * only difference is that this method takes a in-process {@link Criteria}
+     * building sequence for convenience.
+     * </p>
      * 
-     * @param key
-     * @param ccl
-     * @return the result set
+     * @param key the field name
+     * @param ccl a well-formed criteria expressed using the Concourse Criteria
+     *            Language
+     * @return a {@link Map} associating each of the matching records to the
+     *         freshest value in the {@code key} field
      */
     public abstract <T> Map<Long, T> get(String key, String ccl);
 
     /**
-     * Get the most recently added value for {@code key} at {@code timestamp}
-     * for all the records that match the {@code ccl} criteria.
+     * For every record that matches the {@code ccl} filter, return the
+     * stored value in the {@code key} field that was most recently added at
+     * {@code timestamp}.
+     * <p>
+     * This method is syntactic sugar for
+     * {@link #get(String, Criteria, Timestamp)}. The only difference is that
+     * this method takes a in-process {@link Criteria} building sequence for
+     * convenience.
+     * </p>
      * 
-     * @param key
-     * @param ccl
-     * @param timestamp
-     * @return the result set
+     * @param key the field name
+     * @param ccl a well-formed criteria expressed using the Concourse Criteria
+     *            Language
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the matching records to the
+     *         freshest value in the {@code key} field at {@code timestamp}
      */
     public abstract <T> Map<Long, T> get(String key, String ccl,
             Timestamp timestamp);
 
     /**
-     * Get the most recently added values at {@code timestamp} for each key in
-     * all of the records that match {@code ccl} criteria.
+     * For every key in every record that matches the {@code ccl} filter,
+     * return the stored value that was most recently added.
      * 
-     * @param ccl
-     * @param timestamp
-     * @return the result set
+     * @param ccl a well-formed criteria expressed using the Concourse Criteria
+     *            Language
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the record's keys to the freshest
+     *         value in the field
      */
     public abstract <T> Map<Long, Map<String, T>> get(String ccl,
             Timestamp timestamp);
 
     /**
-     * Return the environment of the server that is currently in use by this
-     * client.
+     * Return the name of the connected environment.
      * 
-     * @return the server environment
+     * @return the server environment to which this client is connected
      */
     public abstract String getServerEnvironment();
 
     /**
-     * Return the version of the server to which this client is currently
-     * connected.
+     * Return the version of the connected server.
      * 
      * @return the server version
      */
     public abstract String getServerVersion();
 
     /**
-     * Within a single atomic operation, for each of the {@link Multimap maps}
-     * in {@code data}, insert the key/value associations into a new and
-     * distinct record.
+     * Atomically insert the key/value associations from each of the
+     * {@link Multimap maps} in {@code data} into new and distinct records.
      * <p>
      * Each of the values in each map in {@code data} must be a primitive or one
      * dimensional object (e.g. no nested {@link Map maps} or {@link Multimap
@@ -1393,8 +1795,8 @@ public abstract class Concourse implements AutoCloseable {
      * 
      * @param data a {@link List} of {@link Multimap maps}, each with key/value
      *            associations to insert into a new record
-     * @return a {@link Set} of ids containing the ids of the new records where
-     *         the maps in {@code data} were inserted, respectively
+     * @return a {@link Set} containing the ids of the new records where the
+     *         maps in {@code data} were inserted, respectively
      */
     public final Set<Long> insert(Collection<Multimap<String, Object>> data) {
         String json = Convert.mapsToJson(data);
@@ -1402,8 +1804,8 @@ public abstract class Concourse implements AutoCloseable {
     }
 
     /**
-     * Atomically insert the key/value associations from {@code data} into a new
-     * record.
+     * Atomically insert the key/value associations from {@link Map data} into a
+     * new record.
      * <p>
      * Each of the values in {@code data} must be a primitive or one dimensional
      * object (e.g. no nested {@link Map maps} or {@link Multimap multimaps}).
@@ -1419,9 +1821,14 @@ public abstract class Concourse implements AutoCloseable {
     }
 
     /**
-     * Atomically insert the key/value associations in {@code data} into each of
-     * the {@code records}.
-     * 
+     * Atomically insert the key/value associations from {@link Map data} into
+     * each of the {@code records}, if possible.
+     * <p>
+     * An insert will fail for a given record if any of the key/value
+     * associations in {@code data} currently exist in that record (e.g.
+     * {@link #add(String, Object, long) adding} the key/value association would
+     * fail).
+     * </p>
      * <p>
      * Each of the values in {@code data} must be a primitive or one dimensional
      * object (e.g. no nested {@link Map maps} or {@link Multimap multimaps}).
@@ -1432,7 +1839,8 @@ public abstract class Concourse implements AutoCloseable {
      * @param records a collection of ids for records where the {@code data}
      *            should attempt to be inserted
      * @return a {@link Map} associating each record id to a boolean that
-     *         indicates if the data was successfully inserted in that record
+     *         indicates if the {@code data} was successfully inserted in that
+     *         record
      */
     public final Map<Long, Boolean> insert(Map<String, Object> data,
             Collection<Long> records) {
@@ -1442,9 +1850,14 @@ public abstract class Concourse implements AutoCloseable {
     }
 
     /**
-     * Atomically insert the key/value associations in {@code data} into
-     * {@code record}.
-     * 
+     * Atomically insert the key/value associations from {@link Map data} into
+     * {@code record}, if possible.
+     * <p>
+     * The insert will fail if any of the key/value associations in {@code data}
+     * currently exist in {@code record} (e.g.
+     * {@link #add(String, Object, long) adding} the key/value association would
+     * fail).
+     * </p>
      * <p>
      * Each of the values in {@code data} must be a primitive or one dimensional
      * object (e.g. no nested {@link Map maps} or {@link Multimap multimaps}).
@@ -1462,8 +1875,8 @@ public abstract class Concourse implements AutoCloseable {
     }
 
     /**
-     * Atomically insert the key/value associations from {@code data} into a new
-     * record.
+     * Atomically insert the key/value associations from {@code Multimap data}
+     * into a new record.
      * <p>
      * Each of the values in {@code data} must be a primitive or one dimensional
      * object (e.g. no nested {@link Map maps} or {@link Multimap multimaps}).
@@ -1479,9 +1892,14 @@ public abstract class Concourse implements AutoCloseable {
     }
 
     /**
-     * Atomically insert the key/value associations in {@code data} into each of
-     * the {@code records}.
-     * 
+     * Atomically insert the key/value associations from {@code Multimap data}
+     * into each of the {@code records}, if possible.
+     * <p>
+     * An insert will fail for a given record if any of the key/value
+     * associations in {@code data} currently exist in that record (e.g.
+     * {@link #add(String, Object, long) adding} the key/value association would
+     * fail).
+     * </p>
      * <p>
      * Each of the values in {@code data} must be a primitive or one dimensional
      * object (e.g. no nested {@link Map maps} or {@link Multimap multimaps}).
@@ -1492,7 +1910,8 @@ public abstract class Concourse implements AutoCloseable {
      * @param records a collection of ids for records where the {@code data}
      *            should attempt to be inserted
      * @return a {@link Map} associating each record id to a boolean that
-     *         indicates if the data was successfully inserted in that record
+     *         indicates if the {@code data} was successfully inserted in that
+     *         record
      */
     public final Map<Long, Boolean> insert(Multimap<String, Object> data,
             Collection<Long> records) {
@@ -1501,9 +1920,14 @@ public abstract class Concourse implements AutoCloseable {
     }
 
     /**
-     * Atomically insert the key/value associations in {@code data} into
-     * {@code record}.
-     * 
+     * Atomically insert the key/value associations in {@link Multimap data}
+     * into {@code record}, if possible.
+     * <p>
+     * The insert will fail if any of the key/value associations in {@code data}
+     * currently exist in {@code record} (e.g.
+     * {@link #add(String, Object, long) adding} the key/value association would
+     * fail).
+     * </p>
      * <p>
      * Each of the values in {@code data} must be a primitive or one dimensional
      * object (e.g. no nested {@link Map maps} or {@link Multimap multimaps}).
@@ -1521,642 +1945,948 @@ public abstract class Concourse implements AutoCloseable {
     }
 
     /**
-     * Atomically insert the key/value mappings described in the {@code json}
-     * formatted string into a new record.
+     * Atomically insert the key/value associations from the {@code json} string
+     * into as many new records as necessary.
      * <p>
-     * The {@code json} formatted string must describe an JSON object that
-     * contains one or more keys, each of which maps to a JSON primitive or an
-     * array of JSON primitives.
+     * If the {@code json} string contains a top-level array (of objects), this
+     * method will insert each of the objects in a new and distinct record. The
+     * {@link Set} that is returned will contain the ids of all those records.
+     * On the other hand, if the {@code json} string contains a single top-level
+     * object, this method will insert that object in a single new record. The
+     * {@link Set} that is returned will only contain the id of that record.
+     * </p>
+     * <p>
+     * Regardless of whether the top-level element is an object or an array,
+     * each object in the {@code json} string contains one or more keys, each of
+     * which maps to a JSON primitive or an array of JSON primitives (e.g. no
+     * nested objects or arrays).
      * </p>
      * 
-     * @param json
-     * @return the primary key of the new record or {@code null} if the insert
-     *         is unsuccessful
+     * @param json a valid json string with either a top-level object or array
+     * @return a {@link Set} that contains one or more records ids where the
+     *         objects in {@code json} are inserted, respectively
      */
     public abstract Set<Long> insert(String json);
 
     /**
-     * Insert the key/value mappings described in the {@code json} formated
-     * string into each of the {@code records}.
+     * Atomically insert the key/value associations from the {@code json} object
+     * into each of the {@code records}, if possible.
      * <p>
-     * The {@code json} formatted string must describe an JSON object that
-     * contains one or more keys, each of which maps to a JSON primitive or an
-     * array of JSON primitives.
+     * An insert will fail for a given record if any of the key/value
+     * associations in the {@code json} object currently exist in that record
+     * (e.g. {@link #add(String, Object, long) adding} the key/value association
+     * would fail).
+     * </p>
+     * <p>
+     * The {@code json} must contain a top-level object that contains one or
+     * more keys, each of which maps to a JSON primitive or an array of JSON
+     * primitives (e.g. no nested objects or arrays).
      * </p>
      * 
-     * @param json
-     * @param records
-     * @return a mapping from each primary key to a boolean describing if the
-     *         data was successfully inserted into that record
+     * @param json a valid json string containing a top-level object
+     * @param records a collection of record ids
+     * @return a {@link Map} associating each record id to a boolean that
+     *         indicates if the {@code json} was successfully inserted in that
+     *         record
      */
     public abstract Map<Long, Boolean> insert(String json,
             Collection<Long> records);
 
     /**
-     * Atomically insert the key/value mappings described in the {@code json}
-     * formatted string into {@code record}.
+     * Atomically insert the key/value associations from the {@code json} object
+     * into {@code record}, if possible.
      * <p>
-     * The {@code json} formatted string must describe an JSON object that
-     * contains one or more keys, each of which maps to a JSON primitive or an
-     * array of JSON primitives.
+     * The insert will fail if any of the key/value associations in the
+     * {@code json} object currently exist in {@code record} (e.g.
+     * {@link #add(String, Object, long)
+     * adding} the key/value association would fail).
+     * </p>
+     * <p>
+     * The {@code json} must contain a JSON object that contains one or more
+     * keys, each of which maps to a JSON primitive or an array of JSON
+     * primitives.
      * </p>
      * 
-     * @param json
-     * @param record
-     * @return {@code true} if the data is inserted into {@code record}
+     * @param json json a valid json string containing a top-level object
+     * @param record the record id
+     * @return {@code true} if the {@code json} is inserted into {@code record}
      */
     public abstract boolean insert(String json, long record);
 
     /**
-     * Return a list of all the records that have ever contained data.
+     * Return all the records that have current or historical data.
      * 
-     * @return the full list of records
+     * @return a {@link Set} containing the ids of records that have current or
+     *         historical data
      */
     public abstract Set<Long> inventory();
 
     /**
-     * Dump each of the {@code records} to a JSON string.
+     * Atomically dump the data in each of the {@code records} as a JSON array
+     * of objects.
      * 
-     * @param records
-     * @return the json string dump
+     * @param records a collection of record ids
+     * @return a JSON array of objects, each of which contains the data in the
+     *         one of the {@code records}, respectively
      */
     public abstract String jsonify(Collection<Long> records);
 
     /**
-     * Dump each of the {@code records} to a JSON string that optionally
-     * includes an {@code identifier} for each {@code record}.
+     * Atomically dump the data in each of the {@code records} as a JSON array
+     * of objects and optionally include a special {@code identifier} key that
+     * contains the record id for each of the dumped objects.
      * 
-     * @param records
-     * @param identifier
-     * @return the json string dump
+     * @param records a collection of record ids
+     * @param identifier a boolean that indicates whether to include a special
+     *            key ({@link Constants#JSON_RESERVED_IDENTIFIER_NAME}) that
+     *            maps to the record id in each of the dumped objects
+     * @return a JSON array of objects, each of which contains the data in the
+     *         one of the {@code records}, respectively
      */
     public abstract String jsonify(Collection<Long> records, boolean identifier);
 
     /**
-     * Dump the state of each of the {@code records} at {@code timestamp} to a
-     * JSON string.
+     * Atomically dump the data in each of the {@code records} at
+     * {@code timestamp} as a JSON array of objects.
      * 
-     * @param records
-     * @param timestamp
-     * @return the json string dump
+     * @param records a collection of record ids
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a JSON array of objects, each of which contains the data in the
+     *         one of the {@code records} at {@code timestamp}, respectively
      */
     public abstract String jsonify(Collection<Long> records, Timestamp timestamp);
 
     /**
-     * Dump the state of each of the {@code records} at {@code timestamp} to a
-     * JSON string that optionally includes an {@code identifier} for each
-     * {@code record}.
+     * Atomically dump the data in each of the {@code records} at
+     * {@code timestamp} as a JSON array of objects and optionally include a
+     * special {@code identifier} key that contains the record id for each of
+     * the dumped objects.
      * 
-     * @param records
-     * @param timestamp
-     * @param identifier
-     * @return the json string dump
+     * @param records a collection of record ids
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @param identifier a boolean that indicates whether to include a special
+     *            key ({@link Constants#JSON_RESERVED_IDENTIFIER_NAME}) that
+     *            maps to the record id in each of the dumped objects
+     * @return a JSON array of objects, each of which contains the data in the
+     *         one of the {@code records} at {@code timestamp}, respectively
      */
     public abstract String jsonify(Collection<Long> records,
             Timestamp timestamp, boolean identifier);
 
     /**
-     * Dump {@code record} to a JSON string.
+     * Atomically dump all the data in {@code record} as a JSON object.
      * 
-     * @param record
-     * @return the json string dump
+     * @param record the record id
+     * @return a JSON object that contains all the data in {@code record}
      */
     public abstract String jsonify(long record);
 
     /**
-     * Dump the {@code record} to a JSON string that optionally includes an
-     * {@code identifier} for the record.
+     * Atomically dump all the data in {@code record} as a JSON object and
+     * optionally include a special {@code identifier} key that contains the
+     * record id.
      * 
-     * @param record
-     * @param identifier
-     * @return the json string dump
+     * @param record the record id
+     * @param identifier a boolean that indicates whether to include a special
+     *            key ({@link Constants#JSON_RESERVED_IDENTIFIER_NAME}) that
+     *            maps to the record id in each of the dumped objects
+     * @return a JSON object that contains all the data in {@code record}
      */
     public abstract String jsonify(long record, boolean identifier);
 
     /**
-     * Dump the state of the {@code record} at {@code timestamp} to a JSON
-     * string.
+     * Atomically dump all the data in {@code record} at {@code timestamp} as a
+     * JSON object.
      * 
-     * @param record
-     * @param timestamp
-     * @return the json string dump
+     * @param record the record id
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a JSON object that contains all the data in {@code record} at
+     *         {@code timestamp}
      */
     public abstract String jsonify(long record, Timestamp timestamp);
 
     /**
-     * Dump the state of the {@code record} at {@code timestamp} to a JSON
-     * string that optionally includes an {@code identifier} for the record.
+     * Atomically dump all the data in {@code record} at {@code timestamp} as a
+     * JSON object and optionally include a special {@code identifier} key that
+     * contains the record id.
      * 
-     * @param record
-     * @param timestamp
-     * @param identifier
-     * @return the json string dump
+     * @param record the record id
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @param identifier a boolean that indicates whether to include a special
+     *            key ({@link Constants#JSON_RESERVED_IDENTIFIER_NAME}) that
+     *            maps to the record id in each of the dumped objects
+     * @return a JSON object that contains all the data in {@code record} at
+     *         {@code timestamp}
      */
     public abstract String jsonify(long record, Timestamp timestamp,
             boolean identifier);
 
     /**
-     * Link {@code key} in {@code source} to each of the {@code destinations}.
+     * Append links from {@code key} in {@code source} to each of the
+     * {@code destinations}.
      * 
-     * @param key
-     * @param source
-     * @param destinations
-     * @return a mapping from each destination to a boolean indicating if the
-     *         link was added
+     * @param key the field name
+     * @param source the id of the record where each of the links originate
+     * @param destinations a collection of ids for the records where each of the
+     *            links points, respectively
+     * @return a {@link Map} associating the ids for each of the
+     *         {@code destinations} to a boolean that indicates whether the link
+     *         was successfully added
      */
     public abstract Map<Long, Boolean> link(String key, long source,
             Collection<Long> destinations);
 
     /**
-     * Link {@code key} in {@code source} to {@code destination}.
+     * Append a link from {@code key} in {@code source} to {@code destination}.
      * 
-     * @param key
-     * @param source
-     * @param destination
+     * @param key the field name
+     * @param source the id of the record where the link originates
+     * @param destination the id of the record where the link points
      * @return {@code true} if the link is added
      */
     public abstract boolean link(String key, long source, long destination);
 
     /**
-     * Ping each of the {@code records}.
+     * Atomically check to see if each of the {@code records} currently contains
+     * any data.
      * 
-     * @param records
-     * @return a mapping from each record to a boolean indicating if the record
-     *         currently has at least one populated key
+     * @param records a collection of record ids
+     * @return a {@link Map} associating each of the {@code records} to a
+     *         boolean that indicates whether that record currently contains any
+     *         data.
      */
-    @CompoundOperation
     public abstract Map<Long, Boolean> ping(Collection<Long> records);
 
     /**
-     * Ping {@code record}.
+     * Check to see if {@code record} currently contains any data.
      * 
-     * @param record
-     * @return {@code true} if {@code record} currently has at least one
-     *         populated key
+     * @param record the record id
+     * @return {@code true} if {@code record} currently contains any data,
+     *         otherwise {@code false}
      */
     public abstract boolean ping(long record);
 
     /**
-     * Remove {@code key} as {@code value} in each of the {@code records} if it
-     * is contained.
+     * Atomically remove {@code key} as {@code value} from each of the
+     * {@code records} where it currently exists.
      * 
-     * @param key
-     * @param value
-     * @param records
-     * @return a mapping from each record to a boolean indicating if
-     *         {@code value} is removed
+     * @param key the field name
+     * @param value the value to remove
+     * @param records a collection of record ids
+     * @return a {@link Map} associating each of the {@code records} to a
+     *         boolean that indicates whether the data was removed
      */
-    @CompoundOperation
     public abstract <T> Map<Long, Boolean> remove(String key, T value,
             Collection<Long> records);
 
     /**
-     * Remove {@code key} as {@code value} to {@code record} if it is contained.
+     * Remove {@code key} as {@code value} from {@code record} if it currently
+     * exists.
      * 
-     * @param key
-     * @param value
-     * @param record
-     * @return {@code true} if {@code value} is removed
+     * @param key the field name
+     * @param value the value to remove
+     * @param record the record id
+     * @return {@code true} if the data is removed
      */
     public abstract <T> boolean remove(String key, T value, long record);
 
     /**
-     * Revert each of the {@code keys} in each of the {@code records} to
-     * {@code timestamp} by creating new revisions that the relevant changes
-     * that have occurred since {@code timestamp}.
+     * Atomically revert each of the {@code keys} in each of the {@code records}
+     * to their state at {@code timestamp} by creating new revisions that undo
+     * the net changes that have occurred since {@code timestamp}.
      * 
-     * @param keys
-     * @param records
-     * @param timestamp
+     * @param keys a collection of field names
+     * @param records a collection of record ids
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
      */
-    @CompoundOperation
     public abstract void revert(Collection<String> keys,
             Collection<Long> records, Timestamp timestamp);
 
     /**
-     * Revert each of the {@code keys} in {@code record} to {@code timestamp} by
-     * creating new revisions that the relevant changes that have occurred since
-     * {@code timestamp}.
+     * Atomically revert each of the {@code keys} in {@code record} to their
+     * state at {@code timestamp} by creating new revisions that undo the net
+     * changes that have occurred since {@code timestamp}.
      * 
-     * @param keys
-     * @param record
-     * @param timestamp
+     * @param keys a collection of field names
+     * @param record the record id
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
      */
-    @CompoundOperation
     public abstract void revert(Collection<String> keys, long record,
             Timestamp timestamp);
 
     /**
-     * Revert {@code key} in each of the {@code records} to {@code timestamp} by
-     * creating new revisions that the relevant changes that have occurred since
-     * {@code timestamp}.
+     * Atomically revert {@code key} in each of the {@code records} to its state
+     * at {@code timestamp} by creating new revisions that undo the net
+     * changes that have occurred since {@code timestamp}.
      * 
-     * @param key
-     * @param records
-     * @param timestamp
+     * @param key the field name
+     * @param records a collection of record ids
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
      */
-    @CompoundOperation
     public abstract void revert(String key, Collection<Long> records,
             Timestamp timestamp);
 
     /**
-     * Atomically revert {@code key} in {@code record} to {@code timestamp} by
-     * creating new revisions that undo the relevant changes that have occurred
-     * since {@code timestamp}.
+     * Atomically revert {@code key} in {@code record} to its state at
+     * {@code timestamp} by creating new revisions that undo the net
+     * changes that have occurred since {@code timestamp}.
      * 
-     * @param key
-     * @param record
-     * @param timestamp
+     * @param key the field name
+     * @param record the record id
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
      */
     public abstract void revert(String key, long record, Timestamp timestamp);
 
     /**
-     * Search {@code key} for {@code query} and return the set of records that
-     * match.
+     * Perform a full text search for {@code query} against the {@code key}
+     * field and return the records that contain a {@link String} or {@link Tag}
+     * value that matches.
      * 
      * @param key
      * @param query
-     * @return the records that match the query
+     * @return a {@link Set} of ids for records that match the search query
      */
     public abstract Set<Long> search(String key, String query);
 
     /**
-     * Select the {@code records} and return a mapping from each record to all
-     * the data that is contained as a mapping from key name to value set.
+     * Return all the data that is currently stored in each of the
+     * {@code records}.
      * 
-     * @param records
-     * @return a mapping of all the contained keys and their mapped values in
-     *         each record
+     * @param records a collection of record ids
+     * @return a {@link Map} associating each of the {@code records} to another
+     *         {@link Map} associating every key in that record to a {@link Set}
+     *         containing all the values stored in the respective field
      */
     public abstract Map<Long, Map<String, Set<Object>>> select(
             Collection<Long> records);
 
     /**
-     * Select the {@code records} at {@code timestamp} and return a mapping from
-     * each record to all the data that was contained as a mapping from key name
-     * to value set.
+     * Return all the data that was stored in each of the {@code records} at
+     * {@code timestamp}.
      * 
-     * @param records
-     * @param timestamp
-     * @return a mapping of all the contained keys and their mapped values in
-     *         each record
+     * @param records a collection of record ids
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the {@code records} to another
+     *         {@link Map} associating every key in that record at
+     *         {@code timestamp} to a {@link Set} containing all the values
+     *         stored in the respective field at {@code timestamp}
      */
     public abstract Map<Long, Map<String, Set<Object>>> select(
             Collection<Long> records, Timestamp timestamp);
 
     /**
-     * Select each of the {@code keys} from each of the {@code records} and
-     * return a mapping from each record to a mapping from each key to the
-     * contained values.
+     * Return all the values stored for each of the {@code keys} in each of the
+     * {@code records}.
      * 
-     * @param keys
-     * @param records
-     * @return the contained values for each of the {@code keys} in each of the
-     *         {@code records}
+     * @param keys a collection of field names
+     * @param records a collection of record ids
+     * @return a {@link Map} associating each of the {@code records} to another
+     *         {@link Map} associating each of the {@code keys} to a {@link Set}
+     *         containing all the values stored in the respective field
      */
-    @CompoundOperation
     public abstract <T> Map<Long, Map<String, Set<T>>> select(
             Collection<String> keys, Collection<Long> records);
 
     /**
-     * Select each of the {@code keys} from each of the {@code records} at
-     * {@code timestamp} and return a mapping from each record to a mapping from
-     * each key to the contained values.
+     * Return all the values stored for each of the {@code keys} in each of the
+     * {@code records} at {@code timestamp}.
      * 
-     * @param keys
-     * @param records
-     * @param timestamp
-     * @return the contained values for each of the {@code keys} in each of the
-     *         {@code records} at {@code timestamp}
+     * @param keys a collection of field names
+     * @param records a collection of record ids
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the {@code records} to another
+     *         {@link Map} associating each of the {@code keys} to a {@link Set}
+     *         containing all the values stored in the respective field at
+     *         {@code timestamp}
      */
-    @CompoundOperation
     public abstract <T> Map<Long, Map<String, Set<T>>> select(
             Collection<String> keys, Collection<Long> records,
             Timestamp timestamp);
 
     /**
-     * Select all of the values for each of the {@code keys} in all the records
-     * that match {@code criteria}.
+     * Return all the values stored for each of the {@code keys} in every record
+     * that matches the {@code criteria}.
      * 
-     * @param keys
-     * @param criteria
-     * @return the result set
+     * @param keys a collection of field names
+     * @param criteria a {@link Criteria} that contains a
+     *            well-formed filter for the desired records
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the {@code keys} in that record
+     *         to a {@link Set} containing all the values stored in the
+     *         respective field
      */
     public abstract <T> Map<Long, Map<String, Set<T>>> select(
             Collection<String> keys, Criteria criteria);
 
     /**
-     * Select all of the values for each of the {@code keys} at
-     * {@code timestamp} in all the records that match {@code criteria}.
+     * Return all the values stored for each of the {@code keys} at
+     * {@code timestamp} in every record that matches the {@code criteria}
      * 
-     * @param keys
-     * @param criteria
-     * @param timestamp
-     * @return the result set
+     * @param keys a collection of field names
+     * @param criteria a {@link Criteria} that contains a
+     *            well-formed filter for the desired records
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the {@code keys} in that record
+     *         to a {@link Set} containing all the values stored in the
+     *         respective field at {@code timestamp}
      */
     public abstract <T> Map<Long, Map<String, Set<T>>> select(
             Collection<String> keys, Criteria criteria, Timestamp timestamp);
 
     /**
-     * Select each of the {@code keys} from {@code record} and return a mapping
-     * from each key to the contained values.
+     * Return all the values stored for each of the {@code keys} in
+     * {@code record}.
      * 
-     * @param keys
-     * @param record
-     * @return the contained values for each of the {@code keys} in
-     *         {@code record}
+     * @param keys a collection of field names
+     * @param record the record id
+     * @return a {@link Map} associating each of the {@code keys} to a
+     *         {@link Set} containing all the values stored in the respective
+     *         field
      */
-    @CompoundOperation
     public abstract <T> Map<String, Set<T>> select(Collection<String> keys,
             long record);
 
     /**
-     * Select each of the {@code keys} from {@code record} at {@code timestamp}
-     * and return a mapping from each key to the contained values.
+     * Return all the values stored for each of the {@code keys} in
+     * {@code record} at {@code timestamp}.
      * 
-     * @param keys
-     * @param record
-     * @param timestamp
-     * @return the contained values for each of the {@code keys} in
-     *         {@code record} at {@code timestamp}
+     * @param keys a collection of field names
+     * @param record the record id
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the {@code keys} to a
+     *         {@link Set} containing all the values stored in the respective
+     *         field at {@code timestamp}
      */
-    @CompoundOperation
     public abstract <T> Map<String, Set<T>> select(Collection<String> keys,
             long record, Timestamp timestamp);
 
     /**
-     * Select all of the values for each of the {@code keys} in all the records
-     * that match {@code criteria}.
+     * Return all the values stored for each of the {@code keys} in every record
+     * that matches the {@code criteria}.
+     * <p>
+     * This method is syntactic sugar for {@link #select(Collection, Criteria)}.
+     * The only difference is that this method takes a in-process
+     * {@link Criteria} building sequence for convenience.
+     * </p>
      * 
-     * @param keys
-     * @param criteria
-     * @return the result set
+     * @param keys a collection of field names
+     * @param criteria an in-process {@link Criteria} building sequence that
+     *            contains an {@link BuildableState#build() unfinalized},
+     *            but well-formed filter for the desired
+     *            records
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the {@code keys} in that record
+     *         to a {@link Set} containing all the values stored in the
+     *         respective field
      */
     public abstract <T> Map<Long, Map<String, Set<T>>> select(
             Collection<String> keys, Object criteria);
 
     /**
-     * Select all of the values for each of the {@code keys} at
-     * {@code timestamp} in all the records that match {@code criteria}.
+     * Return all the values stored for each of the {@code keys} at
+     * {@code timestamp} in every record that matches the {@code criteria}.
+     * <p>
+     * This method is syntactic sugar for
+     * {@link #select(Collection, Criteria, Timestamp)}. The only difference is
+     * that this method takes a in-process {@link Criteria} building sequence
+     * for convenience.
+     * </p>
      * 
-     * @param keys
-     * @param criteria
-     * @param timestamp
-     * @return the result set
+     * @param keys a collection of field names
+     * @param criteria an in-process {@link Criteria} building sequence that
+     *            contains an {@link BuildableState#build() unfinalized},
+     *            but well-formed filter for the desired
+     *            records
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the {@code keys} in that record
+     *         to a {@link Set} containing all the values stored in the
+     *         respective field at {@code timestamp}
      */
     public abstract <T> Map<Long, Map<String, Set<T>>> select(
             Collection<String> keys, Object criteria, Timestamp timestamp);
 
     /**
-     * Select all of the values for each of the {@code keys} in all the records
-     * that match {@code ccl} criteria.
+     * Return all the values stored for each of the {@code keys} in every record
+     * that matches the {@code ccl} filter.
      * 
-     * @param keys
-     * @param ccl
-     * @return the result set
+     * @param keys a collection of field names
+     * @param ccl a well-formed criteria expressed using the Concourse Criteria
+     *            Language
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the {@code keys} in that record
+     *         to a {@link Set} containing all the values stored in the
+     *         respective field
      */
     public abstract <T> Map<Long, Map<String, Set<T>>> select(
             Collection<String> keys, String ccl);
 
     /**
-     * Select all of the values for each of the {@code keys} at
-     * {@code timestamp} in all the records that match {@code ccl} criteria.
+     * Return all the values stored for each of the {@code keys} at
+     * {@code timestamp} in every record that matches the {@code ccl} filter.
      * 
-     * @param keys
-     * @param ccl
-     * @param timestamp
-     * @return the result set
+     * @param keys a collection of field names
+     * @param ccl a well-formed criteria expressed using the Concourse Criteria
+     *            Language
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the {@code keys} in that record
+     *         to a {@link Set} containing all the values stored in the
+     *         respective field at {@code timestamp}
      */
     public abstract <T> Map<Long, Map<String, Set<T>>> select(
             Collection<String> keys, String ccl, Timestamp timestamp);
 
     /**
-     * Select all of the values for every key in all the records that match
-     * {@code criteria}.
+     * Return all the data from every record that matches {@code criteria}.
      * 
-     * @param keys
-     * @param criteria
-     * @return the result set
+     * @param keys a collection of field names
+     * @param criteria a {@link Criteria} that contains a well-formed filter for
+     *            the desired records
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the {@code keys} in that record
+     *         to a {@link Set} containing all the values stored in the
+     *         respective field
      */
     public abstract <T> Map<Long, Map<String, Set<T>>> select(Criteria criteria);
 
     /**
-     * Select all of the values for every key at {@code timestamp} in all the
-     * records that match {@code criteria}.
+     * Return all the data at {@code timestamp} from every record that
+     * matches the {@code criteria}.
      * 
-     * @param keys
-     * @param criteria
-     * @param timestamp
-     * @return the result set
+     * @param keys a collection of field names
+     * @param criteria a {@link Criteria} that contains a well-formed filter for
+     *            the desired records
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the {@code keys} in that record
+     *         to a {@link Set} containing all the values stored in the
+     *         respective field at {@code timestamp}
      */
     public abstract <T> Map<Long, Map<String, Set<T>>> select(
             Criteria criteria, Timestamp timestamp);
 
     /**
-     * Select {@code record} and return all the data that is presently contained
-     * as a mapping from key name to value set.
-     * <p>
-     * <em>This method is the atomic equivalent of calling
-     * {@code fetch(describe(record), record)}</em>
-     * </p>
+     * Return all the data from {@code record}.
      * 
-     * @param record
-     * @return a mapping of all the presently contained keys and their mapped
-     *         values
+     * @param record the record id
+     * @return a {@link Map} associating each key in {@code record} to a
+     *         {@link Set} containing all the values stored in the respective
+     *         field
      */
     public abstract Map<String, Set<Object>> select(long record);
 
     /**
-     * Select {@code record} at {@code timestamp} and return all the data that
-     * was contained as a mapping from key name to value set.
-     * <p>
-     * <em>This method is the atomic equivalent of calling
-     * {@code fetch(describe(record, timestamp), record, timestamp)}</em>
-     * </p>
+     * Return all the data from {@code record} at {@code timestamp}.
      * 
-     * @param record
-     * @param timestamp
-     * @return a mapping of all the contained keys and their mapped values
+     * @param record the record id
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each key in {@code record} to a
+     *         {@link Set} containing all the values stored in the respective
+     *         field at {@code timestamp}
      */
     public abstract Map<String, Set<Object>> select(long record,
             Timestamp timestamp);
 
     /**
-     * Select all of the values for every key in all the records that match
-     * {@code criteria}.
+     * Return all the data from every record that matches {@code criteria}.
+     * <p>
+     * This method is syntactic sugar for {@link #select(Criteria)}. The only
+     * difference is that this method takes a in-process {@link Criteria}
+     * building sequence for convenience.
+     * </p>
      * 
-     * @param keys
-     * @param criteria
-     * @return the result set
+     * @param keys a collection of field names
+     * @param criteria an in-process {@link Criteria} building sequence that
+     *            contains an {@link BuildableState#build() unfinalized},
+     *            but well-formed filter for the desired
+     *            records
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the {@code keys} in that record
+     *         to a {@link Set} containing all the values stored in the
+     *         respective field
      */
     public abstract <T> Map<Long, Map<String, Set<T>>> select(Object criteria);
 
     /**
-     * Select all of the values for every key at {@code timestamp} in all the
-     * records that match {@code criteria}.
+     * Return all the data at {@code timestamp} from every record that
+     * matches the {@code criteria}.
+     * <p>
+     * This method is syntactic sugar for {@link #select(Criteria, Timestamp)}.
+     * The only difference is that this method takes a in-process
+     * {@link Criteria} building sequence for convenience.
+     * </p>
      * 
-     * @param keys
-     * @param criteria
-     * @param timestamp
-     * @return the result set
+     * @param keys a collection of field names
+     * @param criteria an in-process {@link Criteria} building sequence that
+     *            contains an {@link BuildableState#build() unfinalized},
+     *            but well-formed filter for the desired
+     *            records
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the {@code keys} in that record
+     *         to a {@link Set} containing all the values stored in the
+     *         respective field at {@code timestamp}
      */
     public abstract <T> Map<Long, Map<String, Set<T>>> select(Object criteria,
             Timestamp timestamp);
 
     /**
-     * Select all of the values for every key in all the records that match
-     * {@code ccl} criteria.
+     * Return all the data from every record that matches {@code ccl} filter.
      * 
-     * @param keys
-     * @param ccl
-     * @return the result set
+     * @param keys a collection of field names
+     * @param ccl a well-formed criteria expressed using the Concourse Criteria
+     *            Language
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the {@code keys} in that record
+     *         to a {@link Set} containing all the values stored in the
+     *         respective field
      */
     public abstract <T> Map<Long, Map<String, Set<T>>> select(String ccl);
 
     /**
-     * Select {@code key} from each of the {@code records} and return a mapping
-     * from each record to contained values.
+     * Return all values stored for {@code key} in each of the {@code records}.
      * 
-     * @param key
-     * @param records
-     * @return the contained values for {@code key} in each {@code record}
+     * @param key the field name
+     * @param records a collection of record ids
+     * @return a {@link Map} associating each of the {@code records} to a
+     *         {@link Set} containing all the values stored in the respective
+     *         field
      */
-    @CompoundOperation
     public abstract <T> Map<Long, Set<T>> select(String key,
             Collection<Long> records);
 
     /**
-     * Select {@code key} from} each of the {@code records} at {@code timestamp}
-     * and return a mapping from each record to the contained values.
+     * Return all values stored for {@code key} in each of the {@code records}
+     * at {@code timestamp}.
      * 
-     * @param key
-     * @param records
-     * @param timestamp
-     * @return the contained values for {@code key} in each of the
-     *         {@code records} at {@code timestamp}
+     * @param key the field name
+     * @param records a collection of record ids
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the {@code records} to a
+     *         {@link Set} containing all the values stored in the respective
+     *         field at {@code timestamp}
      */
-    @CompoundOperation
     public abstract <T> Map<Long, Set<T>> select(String key,
             Collection<Long> records, Timestamp timestamp);
 
     /**
-     * Select all of the values for {@code key} in all the records that match
-     * {@code criteria}.
+     * Return all the values stored for {@code key} in every record that
+     * matches the {@code criteria}.
      * 
-     * @param key
-     * @param criteria
-     * @return the result set
+     * @param key the field name
+     * @param criteria a {@link Criteria} that contains a well-formed filter for
+     *            the desired records
+     * @return a {@link Map} associating each of the matching records to a
+     *         {@link Set} containing all the values stored in the respective
+     *         field
      */
     public abstract <T> Map<Long, Set<T>> select(String key, Criteria criteria);
 
     /**
-     * Select all of the values for {@code key} at {@code timestamp} in all the
-     * records that match {@code criteria}.
+     * Return all the values stored for {@code key} at {@code timestamp} in
+     * every record that matches the {@code criteria}.
      * 
-     * @param key
-     * @param criteria
-     * @param timestamp
-     * @return the result set
+     * @param key the field name
+     * @param criteria a {@link Criteria} that contains a well-formed filter for
+     *            the desired records
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the matching records to a
+     *         {@link Set} containing all the values stored in the respective
+     *         field at {@code timestamp}
      */
     public abstract <T> Map<Long, Set<T>> select(String key, Criteria criteria,
             Timestamp timestamp);
 
     /**
-     * Select {@code key} from {@code record} and return all the contained
-     * values.
+     * Return all the values stored for {@code key} in {@code record}.
      * 
-     * @param key
-     * @param record
-     * @return the contained values
+     * @param key the field name
+     * @param record the record id
+     * @return a {@link Set} containing all the values stored in the field
      */
     public abstract <T> Set<T> select(String key, long record);
 
     /**
-     * Select {@code key} from {@code record} at {@code timestamp} and return
-     * the set of values that were mapped.
+     * Return all the values stored for {@code key} in {@code record} at
+     * {@code timestamp}.
      * 
-     * @param key
-     * @param record
-     * @param timestamp
-     * @return the contained values
+     * @param key the field name
+     * @param record the record id
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Set} containing all the values stored in the field at
+     *         {@code timestamp}
      */
     public abstract <T> Set<T> select(String key, long record,
             Timestamp timestamp);
 
     /**
-     * Select all of the values for {@code key} in all the records that match
-     * {@code criteria}.
+     * Return all the values stored for {@code key} in every record that
+     * matches the {@code criteria}.
+     * <p>
+     * This method is syntactic sugar for {@link #select(String, Criteria)}. The
+     * only difference is that this method takes a in-process {@link Criteria}
+     * building sequence for convenience.
+     * </p>
      * 
-     * @param key
-     * @param criteria
-     * @return the result set
+     * @param key the field name
+     * @param criteria an in-process {@link Criteria} building sequence that
+     *            contains an {@link BuildableState#build() unfinalized},
+     *            but well-formed filter for the desired
+     *            records
+     * @return a {@link Map} associating each of the matching records to a
+     *         {@link Set} containing all the values stored in the respective
+     *         field
      */
     public abstract <T> Map<Long, Set<T>> select(String key, Object criteria);
 
     /**
-     * Select all of the values for {@code key} at {@code timestamp} in all the
-     * records that match {@code criteria}.
+     * Return all the values stored for {@code key} at {@code timestamp} in
+     * every record that matches the {@code criteria}.
+     * <p>
+     * This method is syntactic sugar for
+     * {@link #select(String, Criteria, Timestamp)}. The only difference is that
+     * this method takes a in-process {@link Criteria} building sequence for
+     * convenience.
+     * </p>
      * 
-     * @param key
-     * @param criteria
-     * @param timestamp
-     * @return the result set
+     * @param key the field name
+     * @param criteria an in-process {@link Criteria} building sequence that
+     *            contains an {@link BuildableState#build() unfinalized},
+     *            but well-formed filter for the desired
+     *            records
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the matching records to a
+     *         {@link Set} containing all the values stored in the respective
+     *         field at {@code timestamp}
      */
     public abstract <T> Map<Long, Set<T>> select(String key, Object criteria,
             Timestamp timestamp);
 
     /**
-     * Select all of the values for {@code key} in all the records that match
-     * {@code ccl} criteria.
+     * Return all the values stored for {@code key} in every record that
+     * matches the {@code ccl} filter.
      * 
-     * @param key
-     * @param ccl
-     * @return the result set
+     * @param key the field name
+     * @param ccl a well-formed criteria expressed using the Concourse Criteria
+     *            Language
+     * @return a {@link Map} associating each of the the matching records to a
+     *         {@link Set} containing all the values stored in the respective
+     *         field
      */
     public abstract <T> Map<Long, Set<T>> select(String key, String ccl);
 
     /**
-     * Select all of the values for {@code key} at {@code timestamp} in all the
-     * records that match {@code ccl} criteria.
+     * Return all the values stored for {@code key} at {@code timestamp} in
+     * every record that matches the {@code ccl} filter.
      * 
-     * @param key
-     * @param ccl
-     * @param timestamp
-     * @return the result set
+     * @param key the field name
+     * @param ccl a well-formed criteria expressed using the Concourse Criteria
+     *            Language
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the matching records to a
+     *         {@link Set} containing all the values stored in the respective
+     *         field at {@code timestamp}
      */
     public abstract <T> Map<Long, Set<T>> select(String key, String ccl,
             Timestamp timestamp);
 
     /**
-     * Select all of the values for every key at {@code timestamp} in all the
-     * records that match {@code ccl} criteria.
+     * Return all the data at {@code timestamp} from every record that
+     * matches the {@code ccl} filter.
      * 
-     * @param keys
-     * @param ccl
-     * @param timestamp
-     * @return the result set
+     * @param keys a collection of field names
+     * @param ccl a well-formed criteria expressed using the Concourse Criteria
+     *            Language
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return a {@link Map} associating each of the matching records to another
+     *         {@link Map} associating each of the {@code keys} in that record
+     *         to a {@link Set} containing all the values stored in the
+     *         respective field at {@code timestamp}
      */
     public abstract <T> Map<Long, Map<String, Set<T>>> select(String ccl,
             Timestamp timestamp);
 
     /**
-     * Set {@code key} as {@code value} in each of the {@code records}.
+     * In each of the {@code records}, atomically remove all the values stored
+     * for {@code key} and then add {@code key} as {@code value} in the
+     * respective record.
      * 
-     * @param key
-     * @param value
-     * @param records
+     * @param key the field name
+     * @param value the value to set
+     * @param records a collection of record ids
      */
-    @CompoundOperation
     public abstract void set(String key, Object value, Collection<Long> records);
 
     /**
-     * Atomically set {@code key} as {@code value} in {@code record}. This is a
-     * convenience method that clears the values for {@code key} and adds
-     * {@code value}.
+     * Atomically remove all the values stored for {@code key} in {@code record}
+     * and add then {@code key} as {@code value}.
      * 
-     * @param key
-     * @param value
-     * @param record
+     * @param key the field name
+     * @param value the value to set
+     * @param record the record id
      */
     public abstract <T> void set(String key, T value, long record);
 
@@ -2204,7 +2934,8 @@ public abstract class Concourse implements AutoCloseable {
      * that may result from any actions in the {@code task}.
      * </p>
      * 
-     * @param task the group of operations to execute in the transaction
+     * @param task a {@link Runnable} that contains the group of operations to
+     *            execute in the transaction
      * @return a boolean that indicates if the transaction successfully
      *         committed
      * @throws TransactionException
@@ -2222,18 +2953,19 @@ public abstract class Concourse implements AutoCloseable {
     }
 
     /**
-     * Return the current {@link Timestamp}.
+     * Return a {@link Timestamp} that represents the current instant according
+     * to the server.
      * 
-     * @return the current Timestamp
+     * @return the current time
      */
     public abstract Timestamp time();
 
     /**
-     * Return the {@link Timestamp} that corresponds to the specified number of
-     * {@code micros} from the Unix epoch.
+     * Return a {@link Timestamp} that corresponds to the specified number of
+     * {@code micros}econds since the Unix epoch.
      * 
-     * @param micros
-     * @return the Timestamp
+     * @param micros the number of microseconds since the unix epoch
+     * @return the {@link Timestamp} that represents the desired instant
      */
     public final Timestamp time(long micros) {
         return Timestamp.fromMicros(micros);
@@ -2241,69 +2973,78 @@ public abstract class Concourse implements AutoCloseable {
 
     /**
      * Return the {@link Timestamp} that corresponds to the specified number of
-     * {@code micros} from the Unix epoch.
+     * {@code micros}econds since the Unix epoch.
      * 
-     * @param micros
-     * @return the Timestamp
+     * @param micros the number of microseconds since the unix epoch
+     * @return the {@link Timestamp} that represents the desired instant
      */
     public final Timestamp time(Number micros) {
         return time(micros.longValue());
     }
 
     /**
-     * Return the {@link Timestamp} described by {@code phrase}.
+     * Return the {@link Timestamp}, according to the server, that corresponds
+     * to the instant described by the {@code phrase}.
      * 
-     * @param phrase
-     * @return the Timestamp
+     * @param phrase a natural language description of a point in time.
+     * @return the {@link Timestamp} that represents the desired instant
      */
     public abstract Timestamp time(String phrase);
 
     /**
-     * Remove link from {@code key} in {@code source} to {@code destination}.
+     * If it exists, remove the link from {@code key} in {@code source} to
+     * {@code destination}.
      * 
-     * @param key
-     * @param source
-     * @param destination
+     * @param key the field name
+     * @param source the id of the record where the link originates
+     * @param destination the id of the record where the link points
      * @return {@code true} if the link is removed
      */
     public abstract boolean unlink(String key, long source, long destination);
 
     /**
-     * Verify {@code key} equals {@code value} in {@code record} and return
-     * {@code true} if {@code value} is currently mapped from {@code key} in
+     * Return {@code true} if {@code value} is stored for {@code key} in
      * {@code record}.
      * 
-     * @param key
-     * @param value
-     * @param record
-     * @return {@code true} if {@code key} equals {@code value} in
-     *         {@code record}
+     * @param key the field name
+     * @param value the value to check
+     * @param record the record id
+     * @return {@code true} if {@code value} is stored in the field, otherwise
+     *         {@code false}
      */
     public abstract boolean verify(String key, Object value, long record);
 
     /**
-     * Verify {@code key} equaled {@code value} in {@code record} at
-     * {@code timestamp} and return {@code true} if {@code value} was mapped
-     * from {@code key} in {@code record}.
+     * Return {@code true} if {@code value} was stored for {@code key} in
+     * {@code record} at {@code timestamp}.
      * 
-     * @param key
-     * @param value
-     * @param record
-     * @param timestamp
-     * @return {@code true} if {@code key} equaled {@code value} in
-     *         {@code record} at {@code timestamp}
+     * @param key the field name
+     * @param value the value to check
+     * @param record the record id
+     * @param timestamp a {@link Timestamp} that represents the historical
+     *            instant to use in the lookup – created from either a
+     *            {@link Timestamp#fromString(String) natural language
+     *            description} of a point in time (i.e. two weeks ago), OR
+     *            the {@link Timestamp#fromMicros(long) number
+     *            of microseconds} since the Unix epoch, OR
+     *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+     *            DateTime} object
+     * @return {@code true} if {@code value} is stored in the field, otherwise
+     *         {@code false}
      */
     public abstract boolean verify(String key, Object value, long record,
             Timestamp timestamp);
 
     /**
-     * Atomically verify {@code key} equals {@code expected} in {@code record}
-     * and swap with {@code replacement}.
+     * Atomically replace {@code expected} with {@code replacement} for
+     * {@code key} in {@code record} if and only if {@code expected} is
+     * currently stored in the field.
      * 
-     * @param key
-     * @param expected
-     * @param record
-     * @param replacement
+     * @param key the field name
+     * @param expected the value expected to currently exist in the field
+     * @param record the record id
+     * @param replacement the value with which to replace {@code expected} if
+     *            and only if it currently exists in the field
      * @return {@code true} if the swap is successful
      */
     public abstract boolean verifyAndSwap(String key, Object expected,
@@ -2329,16 +3070,24 @@ public abstract class Concourse implements AutoCloseable {
      * {@code value} already existed.
      * </p>
      * <p>
-     * If you want to add a new value if it does not exist while also preserving
-     * other values, you should use the {@link #add(String, Object, long)}
-     * method instead.
+     * If you want to add a new value only if it does not exist while also
+     * preserving other values, you should use the
+     * {@link #add(String, Object, long)} method instead.
      * </p>
      * 
-     * @param key
-     * @param value
-     * @param record
+     * @param key the field name
+     * @param value the value to check
+     * @param record the record id
      */
     public abstract void verifyOrSet(String key, Object value, long record);
+
+    /**
+     * Return a new {@link Concourse} connection that is connected to the same
+     * deployment with the same credentials as this connection.
+     * 
+     * @return a copy of this connection handle
+     */
+    protected abstract Concourse copyConnection();
 
     /**
      * The implementation of the {@link Concourse} interface that establishes a
@@ -3333,6 +4082,11 @@ public abstract class Concourse implements AutoCloseable {
         @Override
         public Set<Long> find(String key, Object value) {
             return find0(key, Operator.EQUALS, value);
+        }
+
+        @Override
+        public Set<Long> find(String key, Object value, Timestamp timestamp) {
+            return find0(key, Operator.EQUALS, value, timestamp);
         }
 
         @Override
@@ -5391,7 +6145,14 @@ public abstract class Concourse implements AutoCloseable {
          * @param key
          * @param operator
          * @param values
-         * @param timestamp
+         * @param timestamp a {@link Timestamp} that represents the historical
+         *            instant to use in the lookup – created from either a
+         *            {@link Timestamp#fromString(String) natural language
+         *            description} of a point in time (i.e. two weeks ago), OR
+         *            the {@link Timestamp#fromMicros(long) number
+         *            of microseconds} since the Unix epoch, OR
+         *            a {@link Timestamp#fromJoda(org.joda.time.DateTime) Joda
+         *            DateTime} object
          * @return the records that match the criteria.
          */
         private Set<Long> find0(final Timestamp timestamp, final String key,
@@ -5418,6 +6179,13 @@ public abstract class Concourse implements AutoCloseable {
                 }
 
             });
+        }
+
+        @Override
+        protected final Concourse copyConnection() {
+            return new Client(host, port, ByteBuffers.getString(ClientSecurity
+                    .decrypt(username)), ByteBuffers.getString(ClientSecurity
+                    .decrypt(password)), environment);
         }
 
     }

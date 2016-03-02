@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package com.cinchapi.concourse.importer.cli;
 
 import java.io.IOException;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Modifier;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -32,6 +33,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.reflections.Reflections;
+
 import jline.TerminalFactory;
 import jline.console.ConsoleReader;
 
@@ -40,11 +43,13 @@ import com.cinchapi.concourse.Concourse;
 import com.cinchapi.concourse.cli.CommandLineInterface;
 import com.cinchapi.concourse.cli.Options;
 import com.cinchapi.concourse.importer.CsvImporter;
+import com.cinchapi.concourse.importer.Headered;
 import com.cinchapi.concourse.importer.Importer;
 import com.cinchapi.concourse.importer.LegacyCsvImporter;
 import com.cinchapi.concourse.util.FileOps;
 import com.cinchapi.concourse.util.Reflection;
 import com.cinchapi.concourse.util.Strings;
+import com.google.common.base.CaseFormat;
 import com.google.common.base.Stopwatch;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
@@ -95,6 +100,12 @@ public class ImportCli extends CommandLineInterface {
         final Constructor<? extends Importer> constructor = getConstructor(opts.type);
         if(opts.data == null) { // Import data from stdin
             Importer importer = Reflection.newInstance(constructor, concourse);
+            if(!opts.dynamic.isEmpty()) {
+                importer.setParams(options.dynamic);
+            }
+            if(importer instanceof Headered && !opts.header.isEmpty()) {
+                ((Headered) importer).parseHeader(opts.header);
+            }
             try {
                 ConsoleReader reader = new ConsoleReader();
                 String line;
@@ -183,6 +194,12 @@ public class ImportCli extends CommandLineInterface {
                             i == 0 ? concourse : Concourse.connect(opts.host,
                                     opts.port, opts.username, opts.password,
                                     opts.environment));
+                    if(!opts.dynamic.isEmpty()) {
+                        importer0.setParams(opts.dynamic);
+                    }
+                    if(importer0 instanceof Headered && !opts.header.isEmpty()) {
+                        ((Headered) importer0).parseHeader(opts.header);
+                    }
                     runnables.add(new Runnable() {
 
                         private final Importer importer = importer0;
@@ -221,6 +238,12 @@ public class ImportCli extends CommandLineInterface {
             else {
                 Importer importer = Reflection.newInstance(constructor,
                         concourse);
+                if(!opts.dynamic.isEmpty()) {
+                    importer.setParams(opts.dynamic);
+                }
+                if(importer instanceof Headered && !opts.header.isEmpty()) {
+                    ((Headered) importer).parseHeader(opts.header);
+                }
                 System.out.println("Starting import...");
                 watch.start();
                 records = importer.importFile(files.iterator().next());
@@ -251,15 +274,14 @@ public class ImportCli extends CommandLineInterface {
      *            desired {@link Importer} class
      * @return the constructor
      */
-    @SuppressWarnings("unchecked")
     private static Constructor<? extends Importer> getConstructor(String type) {
         Class<? extends Importer> clz = importers.get(type);
         if(clz == null) {
             try {
-                clz = (Class<? extends Importer>) Class.forName(type);
+                clz = getCustomImporterClass(type);
             }
             catch (ClassNotFoundException e) {
-                throw new RuntimeException(String.format(
+                throw new RuntimeException(Strings.format(
                         "{} is not a valid importer type.", type));
             }
         }
@@ -271,6 +293,51 @@ public class ImportCli extends CommandLineInterface {
             // existence of the constructor in the subclass by not defining a
             // no-arg alternative
             throw Throwables.propagate(e);
+        }
+    }
+
+    /**
+     * Given an alias (or fully qualified class name) attempt to load a "custom"
+     * importer that is not already defined in the {@link #importers built-in}
+     * collection.
+     * 
+     * @param alias a conventional alias (FileTypeImporter --> file-type) or a
+     *            fully qualified class name
+     * @return the {@link Class} that corresponds to the custom importer
+     * @throws ClassNotFoundException
+     */
+    @SuppressWarnings("unchecked")
+    private static Class<? extends Importer> getCustomImporterClass(String alias)
+            throws ClassNotFoundException {
+        try {
+            return (Class<? extends Importer>) Class.forName(alias);
+        }
+        catch (ClassNotFoundException e) {
+            // Attempt to determine the correct class name from the alias by
+            // loading the server's classpath. For the record, this is hella
+            // slow.
+            Reflections.log = null; // turn off reflection logging
+            Reflections reflections = new Reflections();
+            char firstChar = alias.charAt(0);
+            for (Class<? extends Importer> clazz : reflections
+                    .getSubTypesOf(Importer.class)) {
+                String name = clazz.getSimpleName();
+                if(name.length() == 0) { // Skip anonymous subclasses
+                    continue;
+                }
+                char nameFirstChar = name.charAt(0);
+                if(!Modifier.isAbstract(clazz.getModifiers())
+                        && (nameFirstChar == Character.toUpperCase(firstChar) || nameFirstChar == Character
+                                .toLowerCase(firstChar))) {
+                    String expected = CaseFormat.UPPER_CAMEL.to(
+                            CaseFormat.LOWER_HYPHEN, clazz.getSimpleName())
+                            .replaceAll("-importer", "");
+                    if(alias.equals(expected)) {
+                        return clazz;
+                    }
+                }
+            }
+            throw e;
         }
     }
 
@@ -311,7 +378,7 @@ public class ImportCli extends CommandLineInterface {
      */
     protected static class ImportOptions extends Options {
 
-        @Parameter(names = { "-d", "--data" }, description = "The path to the file or directory to import. If no source is provided read from stdin")
+        @Parameter(names = { "-d", "--data" }, description = "The path to the file or directory to import; if no source is provided read from stdin")
         public String data;
 
         @Parameter(names = "--numThreads", description = "The number of worker threads to use for a multithreaded import")
@@ -320,8 +387,11 @@ public class ImportCli extends CommandLineInterface {
         @Parameter(names = { "-r", "--resolveKey" }, description = "The key to use when resolving data into existing records")
         public String resolveKey = null;
 
-        @Parameter(names = { "-t", "--type" }, description = "The name of the importer to use.")
+        @Parameter(names = { "-t", "--type" }, description = "The name/type of the importer to use")
         public String type = "csv";
+
+        @Parameter(names = "--header", description = "A custom header to assign for supporting importers")
+        public String header = "";
 
     }
 

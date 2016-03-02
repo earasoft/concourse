@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -60,6 +60,13 @@ public abstract class DelimitedLineImporterTest extends
         Assert.assertEquals(
                 Lists.newArrayList(client.select(legacyRecords).values()),
                 Lists.newArrayList(client.select(records).values()));
+    }
+
+    @Test(expected = IllegalStateException.class)
+    public void testCannotSetHeaderAfterImport() {
+        String file = Resources.get("/" + getImportPath()).getFile();
+        importer.importFile(file);
+        importer.parseHeader("a,b,c,d,e");
     }
 
     /**

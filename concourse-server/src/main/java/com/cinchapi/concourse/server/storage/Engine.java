@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -86,7 +86,8 @@ import static com.google.common.base.Preconditions.*;
 public final class Engine extends BufferedStore implements
         TransactionSupport,
         AtomicSupport,
-        Storage {
+        Storage,
+        InventoryTracker {
 
     //
     // NOTES ON LOCKING:
@@ -584,6 +585,11 @@ public final class Engine extends BufferedStore implements
             sb.append(System.getProperty("line.separator"));
         }
         return sb.toString();
+    }
+    
+    @Override
+    public Inventory getInventory() {
+        return inventory;
     }
 
     @Override

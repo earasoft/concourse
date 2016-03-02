@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,8 @@ import java.util.Collection;
 import java.util.List;
 
 import javax.annotation.Nullable;
+
+import org.apache.commons.lang.StringUtils;
 
 import com.cinchapi.concourse.importer.Transformer;
 import com.cinchapi.concourse.util.KeyValue;
@@ -97,7 +99,7 @@ public class Importables {
                         }
                         // TODO process resolve key
                         json.name(key.trim());
-                        if(value.isEmpty()) {
+                        if(StringUtils.isBlank(value)) {
                             json.nullValue();
                         }
                         else if(jvalue instanceof Collection) {
@@ -213,7 +215,7 @@ public class Importables {
                     }
                     // TODO process resolve key
                     json.name(key.trim());
-                    if(value.isEmpty()) {
+                    if(StringUtils.isBlank(value)) {
                         json.nullValue();
                     }
                     else if(jvalue instanceof Collection) {
@@ -255,7 +257,7 @@ public class Importables {
         }
         else {
             value = Strings.ensureWithinQuotes(value);
-            value = Strings.escapeInner(value, value.charAt(0));
+            value = Strings.escapeInner(value, value.charAt(0), '\n');
             out.jsonValue(value);
         }
     }

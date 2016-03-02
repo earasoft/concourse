@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -41,6 +41,12 @@ public class QuoteAwareStringSplitter extends StringSplitter {
      * quoted token.
      */
     private char previousChar = ' ';
+
+    /**
+     * The position where the most recent single quote character was found. We
+     * keep track of this in case the single quote was actually an apostrophe.
+     */
+    private int singleQuotePos = -1;
 
     /**
      * Construct a new instance.
@@ -97,7 +103,8 @@ public class QuoteAwareStringSplitter extends StringSplitter {
 
     @Override
     protected void updateIsReadyToSplit(char c) {
-        if(c == '\''
+        if(previousChar != '\\'
+                && c == '\''
                 && !inDoubleQuote
                 && (inSingleQuote || (!inSingleQuote && !Character
                         .isLetter(previousChar)))) {
@@ -105,11 +112,28 @@ public class QuoteAwareStringSplitter extends StringSplitter {
             // if the previous char was not a letter (in which case we assume
             // the single quote is actually an apostrophe)
             inSingleQuote ^= true;
+            singleQuotePos = pos - 1;
         }
-        else if(c == '"' && !inSingleQuote) {
+        else if(previousChar != '\\' && c == '"' && !inSingleQuote) {
             inDoubleQuote ^= true;
         }
         previousChar = c;
+    }
+
+    @Override
+    public boolean confirmSetNext() {
+        if(inSingleQuote) {
+            // If an attempt is made to set the next while we are in a single
+            // quote we must backtrack because the single quote was actually an
+            // apostrophe
+            inSingleQuote = false;
+            pos = singleQuotePos + 1;
+            singleQuotePos = -1;
+            return false;
+        }
+        else {
+            return super.confirmSetNext();
+        }
     }
 
 }

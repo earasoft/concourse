@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -228,6 +228,16 @@ public class ImportablesTest {
         Importables.writeJsonValue(out, "true");
         out.endArray();
         Assert.assertEquals("[true]", sb.toString());
+    }
+    
+    @Test
+    public void testWriteOutJsonStringWithLineBreak() throws IOException {
+        StringBuilder sb = new StringBuilder();
+        JsonWriter out = new JsonWriter(new StringBuilderWriter(sb));
+        out.beginArray();
+        Importables.writeJsonValue(out, "a\n\nb");
+        out.endArray();
+        Assert.assertEquals("[\"a\\n\\nb\"]", sb.toString());
     }
 
 }

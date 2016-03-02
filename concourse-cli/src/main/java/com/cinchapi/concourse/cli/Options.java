@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,9 +18,11 @@ package com.cinchapi.concourse.cli;
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.Map;
 
 import com.cinchapi.concourse.config.ConcourseClientPreferences;
-
+import com.google.common.collect.Maps;
+import com.beust.jcommander.DynamicParameter;
 import com.beust.jcommander.Parameter;
 
 /**
@@ -69,7 +71,7 @@ public class Options {
 
     @Parameter(names = "--password", description = "The password", password = false, hidden = true)
     public String password = prefsHandler != null ? new String(
-            prefsHandler.getPassword()) : null;
+            prefsHandler.getPasswordExplicit()) : null;
 
     @Parameter(names = { "-e", "--environment" }, description = "The environment of the Concourse Server to use")
     public String environment = prefsHandler != null ? prefsHandler
@@ -80,5 +82,8 @@ public class Options {
 
     @Parameter(names = { "--verbose" }, description = "Turn on the display of informational logging")
     public boolean verbose = false;
+
+    @DynamicParameter(names = "-D", description = "Use this flag to define a dynamic paramter")
+    public Map<String, String> dynamic = Maps.newHashMap();
 
 }

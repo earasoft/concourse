@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package com.cinchapi.concourse.server.storage;
 import java.util.Map;
 import java.util.Set;
 
+import com.cinchapi.common.base.TernaryTruth;
 import com.cinchapi.concourse.server.concurrent.LockService;
 import com.cinchapi.concourse.server.concurrent.RangeLockService;
 import com.cinchapi.concourse.server.storage.temp.Limbo;
@@ -555,18 +556,36 @@ public abstract class BufferedStore extends BaseStore {
      * {@link #remove(String, TObject, long)} so that we can avoid creating a
      * duplicate Write.
      * 
-     * @param write
-     * @param lock
+     * @param write the comparison {@link Write} to verify
+     * @param lock a flag that controls whether an {@link AtomicSupport} store
+     *            should or should not grab a lock when performing this
+     *            operation
      * @return {@code true} if {@code write} currently exists
      */
     protected boolean verify(Write write, boolean lock) {
         String key = write.getKey().toString();
         TObject value = write.getValue().getTObject();
         long record = write.getRecord().longValue();
-        boolean fromDest = (!lock && destination instanceof AtomicSupport) ? ((AtomicSupport) destination)
-                .verifyUnsafe(key, value, record) : destination.verify(key,
-                value, record);
-        return buffer.verify(write, fromDest);
+        TernaryTruth exists = buffer.verifyFast(write);
+        if(exists != TernaryTruth.UNSURE) {
+            return exists.boolValue();
+        }
+        else {
+            if((!(buffer instanceof InventoryTracker) && destination instanceof InventoryTracker)
+                    && !((InventoryTracker) destination).getInventory()
+                            .contains(write.getRecord().longValue())) {
+                return false; // This is basically a special case for atomic
+                              // operations
+
+            }
+            else if(!lock && destination instanceof AtomicSupport) {
+                return ((AtomicSupport) destination).verifyUnsafe(key, value,
+                        record);
+            }
+            else {
+                return destination.verify(key, value, record);
+            }
+        }
     }
 
 }

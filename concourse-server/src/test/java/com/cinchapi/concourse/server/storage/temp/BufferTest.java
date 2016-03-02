@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,6 +27,8 @@ import org.junit.Ignore;
 import org.junit.Test;
 import org.mockito.Mockito;
 
+import com.cinchapi.common.base.TernaryTruth;
+import com.cinchapi.concourse.server.GlobalState;
 import com.cinchapi.concourse.server.io.FileSystem;
 import com.cinchapi.concourse.server.storage.PermanentStore;
 import com.cinchapi.concourse.server.storage.Store;
@@ -202,6 +204,67 @@ public class BufferTest extends LimboTest {
             ++i;
         }
         Assert.assertEquals(expected, stored);
+    }
+
+    @Test
+    public void testVerifyFastTrue() {
+        Buffer buffer = (Buffer) store;
+        Write write = Write.add("foo", Convert.javaToThrift("bar"), 1);
+        buffer.insert(write);
+        Assert.assertEquals(TernaryTruth.TRUE, buffer.verifyFast(write));
+    }
+
+    @Test
+    public void testVerifyFastFalseRemoved() {
+        Buffer buffer = (Buffer) store;
+        Write write = Write.add("foo", Convert.javaToThrift("bar"), 1);
+        buffer.insert(write);
+        buffer.insert(write.inverse());
+        Assert.assertEquals(TernaryTruth.FALSE, buffer.verifyFast(write));
+    }
+
+    @Test
+    public void testVerifyFastFalseNeverAdded() {
+        Buffer buffer = (Buffer) store;
+        Write write = Write.add("foo", Convert.javaToThrift("bar"), 1);
+        Assert.assertEquals(TernaryTruth.FALSE, buffer.verifyFast(write));
+    }
+
+    @Test
+    public void testVerifyFastUnsure() {
+        Buffer buffer = (Buffer) store;
+        Write write = Write.add("foo", Convert.javaToThrift("bar"), 1);
+        buffer.insert(write);
+        while (!buffer.canTransport()) {
+            buffer.insert(TestData.getWriteAdd());
+        }
+        buffer.transport(MOCK_DESTINATION);
+        Assert.assertEquals(TernaryTruth.UNSURE, buffer.verifyFast(write));
+    }
+
+    @Test
+    public void testOnDiskIteratorEmptyDirectory() {
+        Buffer buffer = (Buffer) store;
+        Buffer.onDiskIterator(buffer.getBackingStore() + "/foo").hasNext();
+        Assert.assertTrue(true); // lack of exception means test passes
+    }
+
+    @Test
+    public void testPageExpansion() {
+        // NOTE: This test is designed to ensure that buffer pages can
+        // automatically expand to accommodate a write that is larger than
+        // BUFFER_PAGE_SIZE
+        int oldBufferPageSize = GlobalState.BUFFER_PAGE_SIZE;
+        try {
+            GlobalState.BUFFER_PAGE_SIZE = 4;
+            Buffer buffer = getStore();
+            buffer.start();
+            buffer.insert(Write.add("foo", Convert.javaToThrift(4), 1));
+            Assert.assertTrue(buffer.contains(1));
+        }
+        finally {
+            GlobalState.BUFFER_PAGE_SIZE = oldBufferPageSize;
+        }
     }
 
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,14 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.cinchapi.concourse.server.http.routers;
+package com.cinchapi.concourse.server.http.plugins;
 
 import spark.Request;
 import spark.Response;
 
+import com.cinchapi.concourse.plugin.http.HttpPlugin;
 import com.cinchapi.concourse.server.ConcourseServer;
 import com.cinchapi.concourse.server.http.Resource;
-import com.cinchapi.concourse.server.http.Router;
 import com.cinchapi.concourse.thrift.AccessToken;
 import com.cinchapi.concourse.thrift.TransactionToken;
 import com.google.gson.JsonElement;
@@ -31,7 +31,7 @@ import com.google.gson.JsonPrimitive;
  * 
  * @author Jeff Nelson
  */
-public class HelpRouter extends Router {
+public class HelpRouter extends HttpPlugin {
 
     /**
      * Construct a new instance.

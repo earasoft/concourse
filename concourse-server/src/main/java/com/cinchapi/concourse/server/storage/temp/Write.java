@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -262,6 +262,27 @@ public final class Write implements Byteable, Versioned {
     @Override
     public boolean isStorable() {
         return version != NO_VERSION;
+    }
+
+    /**
+     * Return a new {@link Write} (with a more recent and unique
+     * {@link #version} that has the same {@link #key}, {@link #value} and
+     * {@link #record} components as this write but has the inverse
+     * {@link Write#type}.
+     * 
+     * @return a new {@link Write} that is the inverse of this one
+     */
+    public Write inverse() {
+        if(type == Action.ADD) {
+            return new Write(Action.REMOVE, key, value, record, Time.now());
+        }
+        else if(type == Action.REMOVE) {
+            return new Write(Action.ADD, key, value, record, Time.now());
+        }
+        else {
+            throw new UnsupportedOperationException(
+                    "Cannot take the inversion of a comparison write");
+        }
     }
 
     /**

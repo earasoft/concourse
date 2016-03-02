@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -270,6 +270,14 @@ public class InsertTest extends ConcourseIntegrationTest {
         long record = TestData.getLong();
         client.add("name", "Jeff Nelson", record);
         Assert.assertFalse(client.insert(map, record));
+    }
+
+    @Test(expected = Exception.class)
+    // @Test(expected = InvalidArgumentException.class) //TODO CON-460
+    public void testInsertJsonArrayReproA() {
+        String json = "[{\"id\":34,\"handle\":\".tp-caption.medium_bg_orange\",\"settings\":\"{\\\"hover\\\":\\\"false\\\"}\",\"hover\":\"\",\"params\":'{\"color\":\"rgb(255, 255, 255)\",\"font-size\":\"20px\",\"line-height\":\"20px\",\"font-weight\":\"800\",\"font-family\":\"\\\"Open Sans\\\"\",\"text-decoration\":\"none\",\"padding\":\"10px\",\"background-color\":\"rgb(243, 156, 18)\",\"border-width\":\"0px\",\"border-color\":\"rgb(255, 214, 88)\",\"border-style\":\"none\"}',\"__table\":\"wp_revslider_css\"}]";
+        Set<Long> records = client.insert(json);
+        Assert.assertFalse(records.isEmpty());
     }
 
 }

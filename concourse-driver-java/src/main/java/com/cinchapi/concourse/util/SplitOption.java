@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,7 +35,13 @@ public enum SplitOption {
      * In addition to splitting on the delimiter, split on an any kind of
      * parenthesis and return the same as an individual token.
      */
-    TOKENIZE_PARENTHESIS(1);
+    TOKENIZE_PARENTHESIS(1),
+
+    /**
+     * For the {@link QuoteAwareStringSplitter} drop any quotes that surround a
+     * quoted sequence that may contain a delimiter.
+     */
+    DROP_QUOTES(2);
 
     /**
      * A constant that signifies no split options should be passed to the

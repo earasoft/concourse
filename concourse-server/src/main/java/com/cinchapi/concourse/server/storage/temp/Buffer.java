@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,11 +31,13 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
 
 import jsr166e.StampedLock;
 
+import com.cinchapi.common.base.TernaryTruth;
 import com.cinchapi.concourse.Tag;
 import com.cinchapi.concourse.annotate.Restricted;
 import com.cinchapi.concourse.server.GlobalState;
@@ -50,6 +52,7 @@ import com.cinchapi.concourse.server.model.Text;
 import com.cinchapi.concourse.server.model.Value;
 import com.cinchapi.concourse.server.storage.Action;
 import com.cinchapi.concourse.server.storage.Inventory;
+import com.cinchapi.concourse.server.storage.InventoryTracker;
 import com.cinchapi.concourse.server.storage.PermanentStore;
 import com.cinchapi.concourse.server.storage.cache.BloomFilter;
 import com.cinchapi.concourse.server.storage.db.Database;
@@ -87,7 +90,7 @@ import static com.google.common.collect.Maps.newLinkedHashMap;
  * @author Jeff Nelson
  */
 @ThreadSafe
-public final class Buffer extends Limbo {
+public final class Buffer extends Limbo implements InventoryTracker {
 
     /**
      * Assuming {@code location} is a valid bufferStore, return an
@@ -514,12 +517,7 @@ public final class Buffer extends Limbo {
         return transportThreadSleepTimeInMs;
     }
 
-    /**
-     * Return the Buffer's inventory collection.
-     * 
-     * @return the {@link Inventory} that is associated with this Buffer
-     *         instance
-     */
+    @Override
     public Inventory getInventory() {
         return inventory;
     }
@@ -745,6 +743,16 @@ public final class Buffer extends Limbo {
     }
 
     @Override
+    public TernaryTruth verifyFast(Write write, long timestamp) {
+        if(inventory.contains(write.getRecord().longValue())) {
+            return super.verifyFast(write, timestamp);
+        }
+        else {
+            return TernaryTruth.FALSE;
+        }
+    }
+
+    @Override
     public void waitUntilTransportable() {
         if(pages.size() <= 1) {
             synchronized (transportable) {
@@ -771,8 +779,20 @@ public final class Buffer extends Limbo {
     }
 
     @Override
-    protected long getOldestWriteTimstamp() {
+    protected long getOldestWriteTimestamp() {
         return pages.get(0).getOldestWriteTimestamp();
+    }
+
+    @Nullable
+    @Override
+    protected Action getLastWriteAction(Write write, long timestamp) {
+        // TODO: use ReverseSeekingIterator to optimize this
+        Iterator<Write> it = iterator(write, timestamp);
+        Action action = null;
+        while (it.hasNext()) {
+            action = it.next().getType();
+        }
+        return action;
     }
 
     @Override
@@ -966,7 +986,8 @@ public final class Buffer extends Limbo {
             this.filename = filename;
             this.content = FileSystem.map(filename, MapMode.READ_WRITE, 0,
                     capacity);
-            this.sizeUpperBound = (int) ((capacity / AVG_WRITE_SIZE) * 1.2);
+            this.sizeUpperBound = Math.max(1,
+                    (int) ((capacity / AVG_WRITE_SIZE) * 1.2));
             this.writes = new Write[sizeUpperBound];
             this.recordCache = new boolean[sizeUpperBound];
             this.keyCache = new boolean[sizeUpperBound];
@@ -989,8 +1010,8 @@ public final class Buffer extends Limbo {
          * situation where the currentPage is ever changed in the middle of a
          * read.
          * 
-         * @param write
-         * @param sync - a flag that determines if the page should be fsynced
+         * @param write the {@link Write} to append
+         * @param sync a flag that determines if the page should be fsynced
          *            (or the equivalent) after appending {@code write} so that
          *            the changes are guaranteed to be durably persisted, this
          *            flag should almost always be {@code true} if calling this
@@ -1007,13 +1028,15 @@ public final class Buffer extends Limbo {
             long stamp = accessLock.writeLock();
             try {
                 if(content.remaining() >= write.size() + 4) {
-                    index(write);
-                    content.putInt(write.size());
-                    write.copyTo(content);
-                    inventory.add(write.getRecord().longValue());
-                    if(sync) {
-                        sync();
-                    }
+                    appendUnsafe(write, sync); /* (authorized) */
+                }
+                else if(content.position() == 0) {
+                    // Handle corner case where a Write is larger than
+                    // BUFFER_PAGE_SIZE by auto expanding the capacity for the
+                    // page
+                    content = FileSystem.map(filename, MapMode.READ_WRITE, 0,
+                            write.size() + 4);
+                    appendUnsafe(write, sync); /* (authorized) */
                 }
                 else {
                     throw CapacityException.INSTANCE;
@@ -1288,6 +1311,31 @@ public final class Buffer extends Limbo {
         }
 
         /**
+         * Do the work to actually index and append {@code write} (while
+         * optionally performing a {@code sync} WITHOUT grabbing any locks
+         * (hence this method being UNSAFE) for unauthorized usage.
+         * 
+         * @param write the {@link Write} to append
+         * @param sync a flag that determines if the page should be fsynced
+         *            (or the equivalent) after appending {@code write} so that
+         *            the changes are guaranteed to be durably persisted, this
+         *            flag should almost always be {@code true} if calling this
+         *            method directly. It is set to {@code false} when called
+         *            from the context of an atomic operation transporting
+         *            writes to this Buffer using GROUP SYNC
+         */
+        @GuardedBy("Buffer.Page#append(Write)")
+        private void appendUnsafe(Write write, boolean sync) {
+            index(write);
+            content.putInt(write.size());
+            write.copyTo(content);
+            inventory.add(write.getRecord().longValue());
+            if(sync) {
+                sync();
+            }
+        }
+
+        /**
          * Insert {@code write} into the list of {@link #writes} and increment
          * the {@link #size} counter.
          * 
@@ -1404,7 +1452,7 @@ public final class Buffer extends Limbo {
          */
         protected SeekingIterator(long timestamp) {
             this.timestamp = timestamp;
-            if(timestamp >= getOldestWriteTimstamp()) {
+            if(timestamp >= getOldestWriteTimestamp()) {
                 scaleBackTransportRate();
                 this.ignoreTimestamp = timestamp == Long.MAX_VALUE;
                 this.next = advance();
@@ -1792,9 +1840,6 @@ public final class Buffer extends Limbo {
             if(fileIt.hasNext()) {
                 ByteBuffer bytes = FileSystem.readBytes(fileIt.next());
                 it = ByteableCollections.iterator(bytes);
-            }
-            else {
-                flip();
             }
         }
 

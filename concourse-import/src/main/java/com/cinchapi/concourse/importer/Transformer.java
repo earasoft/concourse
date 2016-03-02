@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ import com.cinchapi.concourse.util.KeyValue;
  * potentially alters one or both of them, prior to import.
  * <p>
  * Sometimes, raw data from a source must be modified before being imported into
- * Concourse:
+ * Concourse, for example:
  * <ul>
  * <li>Modifying keys by changing their case or stripping illegal characters</li>
  * <li>Normalizing values, for example, converting strings to a specific case or

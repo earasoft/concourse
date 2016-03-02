@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -79,7 +79,7 @@ public class StringsTest {
 
     @Test
     public void testTryParseCoercedDouble() {
-        Double d = Random.getDouble();
+        Double d = Variables.register("double", Random.getDouble());
         Assert.assertEquals(d, Strings.tryParseNumber(d + "D"));
     }
 
@@ -209,6 +209,13 @@ public class StringsTest {
     }
 
     @Test
+    public void testEscapeInnerLineBreak() {
+        String string = "\"a\n\nb\"";
+        String expected = "\"a\\n\\nb\"";
+        Assert.assertEquals(expected, Strings.escapeInner(string, '\n'));
+    }
+
+    @Test
     public void testDoNotParseStringAsNumberWithLeadingZero() {
         Assert.assertNull(Strings.tryParseNumber("01"));
     }
@@ -216,6 +223,83 @@ public class StringsTest {
     @Test
     public void testParseStringAsNumberIfDecimalWithLeadingZero() {
         Assert.assertTrue(Strings.tryParseNumberStrict("0.0123") instanceof Number);
+    }
+
+    @Test
+    public void testEnsureStartsWithAlreadyTrue() {
+        String prefix = Random.getString();
+        String string = prefix + Random.getString();
+        Assert.assertTrue(Strings.ensureStartsWith(string, prefix).startsWith(
+                prefix));
+    }
+
+    @Test
+    public void testEnsureStartsWithNotAlreadyTrue() {
+        String prefix = Random.getString();
+        String string = null;
+        while (string == null || string.startsWith(prefix)) {
+            string = Random.getString();
+        }
+        Assert.assertTrue(Strings.ensureStartsWith(string, prefix).startsWith(
+                prefix));
+    }
+
+    @Test
+    public void testEnsureWithinQuotesIfNeeded() {
+        String string = "a b c";
+        Assert.assertEquals(string,
+                Strings.ensureWithinQuotesIfNeeded(string, ','));
+        string = "a, b c";
+        Assert.assertEquals(Strings.format("\"{}\"", string),
+                Strings.ensureWithinQuotesIfNeeded(string, ','));
+        string = "a, b \"c";
+        Assert.assertEquals(Strings.format("'{}'", string),
+                Strings.ensureWithinQuotesIfNeeded(string, ','));
+        string = "a, b 'c";
+        Assert.assertEquals(Strings.format("\"{}\"", string),
+                Strings.ensureWithinQuotesIfNeeded(string, ','));
+        string = "a, 'b' \"c\"";
+        Assert.assertEquals("\"a, 'b' \\\"c\\\"\"",
+                Strings.ensureWithinQuotesIfNeeded(string, ','));
+    }
+
+    @Test
+    public void testEscapeInnerWhenAlreadyEscaped() {
+        String string = "this is a \\\"real\\\" \"real\" problem";
+        string = Strings.ensureWithinQuotes(string);
+        String expected = "\"this is a \\\"real\\\" \\\"real\\\" problem\"";
+        Assert.assertEquals(expected,
+                Strings.escapeInner(string, string.charAt(0)));
+    }
+
+    @Test
+    public void testTryParseNumberIpAddress() {
+        Assert.assertNull(Strings.tryParseNumber("23.229.8.250"));
+    }
+
+    @Test
+    public void testTryParseNumberPeriod() {
+        Assert.assertNull(Strings.tryParseNumber("."));
+    }
+
+    @Test
+    public void testIsWithinQuotesQuotedEmptyString() {
+        Assert.assertFalse(Strings.isWithinQuotes("\"\""));
+        Assert.assertFalse(Strings.isWithinQuotes("\'\'"));
+    }
+
+    @Test
+    public void testEnsureWithinQuotesQuotedEmptyString() {
+        String string = "\"\"";
+        Assert.assertEquals("\"\"\"\"", Strings.ensureWithinQuotes(string));
+    }
+    
+    @Test
+    public void testReplaceUnicodeConfusables(){
+        String expected = "\"a\"";
+        Assert.assertEquals(expected, Strings.replaceUnicodeConfusables(expected));
+        Assert.assertEquals(expected, Strings.replaceUnicodeConfusables("˝a˝"));
+        Assert.assertEquals(expected, Strings.replaceUnicodeConfusables("″a‶"));
     }
 
 }

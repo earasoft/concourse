@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -118,7 +118,7 @@ public abstract class CommandLineInterface {
                 ConcourseClientPreferences prefs = ConcourseClientPreferences
                         .open(options.prefs);
                 options.username = prefs.getUsername();
-                options.password = new String(prefs.getPassword());
+                options.password = new String(prefs.getPasswordExplicit());
                 options.host = prefs.getHost();
                 options.port = prefs.getPort();
                 options.environment = prefs.getEnvironment();

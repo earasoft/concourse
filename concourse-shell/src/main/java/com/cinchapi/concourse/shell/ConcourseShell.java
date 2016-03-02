@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,6 +31,8 @@ import static java.text.MessageFormat.format;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+
+import javax.annotation.Nullable;
 
 import groovy.lang.Binding;
 import groovy.lang.Closure;
@@ -64,6 +66,7 @@ import com.cinchapi.concourse.thrift.ParseException;
 import com.cinchapi.concourse.thrift.SecurityException;
 import com.cinchapi.concourse.util.FileOps;
 import com.cinchapi.concourse.util.Version;
+import com.google.common.base.CaseFormat;
 import com.google.common.base.Stopwatch;
 import com.google.common.base.Strings;
 import com.google.common.base.Throwables;
@@ -108,7 +111,7 @@ public final class ConcourseShell {
                 ConcourseClientPreferences prefs = ConcourseClientPreferences
                         .open(opts.prefs);
                 opts.username = prefs.getUsername();
-                opts.password = new String(prefs.getPassword());
+                opts.password = new String(prefs.getPasswordExplicit());
                 opts.host = prefs.getHost();
                 opts.port = prefs.getPort();
                 opts.environment = prefs.getEnvironment();
@@ -327,6 +330,31 @@ public final class ConcourseShell {
                 throw Throwables.propagate(e);
             }
         }
+    }
+
+    /**
+     * Attempt to return the {@link #ACCESSIBLE_API_METHODS API method} that is
+     * the closest match for the specified {@code alias}.
+     * <p>
+     * This method can be used to take a user supplied method name that does not
+     * match any of the {@link #ACCESSIBLE_API_METHODS provided} ones, but can
+     * be reasonably assumed to be a valid alias of some sort (i.e. an API
+     * method name in underscore case as opposed to camel case).
+     * </p>
+     * 
+     * @param alias the method name that may be an alias for one of the provided
+     *            API methods
+     * @return the actual API method that {@code alias} should resolve to, if it
+     *         is possible to determine that; otherwise {@code null}
+     */
+    @Nullable
+    private static String tryGetCorrectApiMethod(String alias) {
+        String camel = CaseFormat.LOWER_UNDERSCORE.to(CaseFormat.LOWER_CAMEL,
+                alias);
+        String expanded = com.cinchapi.concourse.util.Strings.ensureStartsWith(
+                camel, "concourse.");
+        return methods.contains(expanded) && !camel.equals(alias) ? camel
+                : null;
     }
 
     /**
@@ -617,8 +645,10 @@ public final class ConcourseShell {
                 // CON-331: Here we catch a generic Exception and examine
                 // additional context (i.e. the cause or other environmental
                 // aspects) to perform additional logic that determines the
-                // appropriate response. These case SHOULD NOT be placed in
+                // appropriate response. These cases SHOULD NOT be placed in
                 // their own separate catch block.
+                String method = null;
+                String methodCorrected = null;
                 if(e.getCause() instanceof TTransportException) {
                     throw new ProgramCrash(e.getMessage());
                 }
@@ -628,11 +658,15 @@ public final class ConcourseShell {
                                     + "session cannot continue");
                 }
                 else if(e instanceof MissingMethodException
-                        && hasExternalScript()
-                        && ErrorCause.determine(e.getMessage()) == ErrorCause.MISSING_CASH_METHOD) {
-                    String method = e.getMessage().split("ConcourseShell.")[1]
-                            .split("\\(")[0];
-                    input = input.replaceAll(method, "ext." + method);
+                        && ErrorCause.determine(e.getMessage()) == ErrorCause.MISSING_CASH_METHOD
+                        && ((methodCorrected = tryGetCorrectApiMethod((method = ((MissingMethodException) e)
+                                .getMethod()))) != null || hasExternalScript())) {
+                    if(methodCorrected != null) {
+                        input = input.replaceAll(method, methodCorrected);
+                    }
+                    else {
+                        input = input.replaceAll(method, "ext." + method);
+                    }
                     return evaluate(input);
                 }
                 else {
@@ -647,7 +681,7 @@ public final class ConcourseShell {
     /**
      * Return {@code true} if this instance has an external script loaded.
      * 
-     * @return {@true} if an external script has been loaded
+     * @return {@code true} if an external script has been loaded
      */
     public boolean hasExternalScript() {
         return script != null;
@@ -794,7 +828,7 @@ public final class ConcourseShell {
 
         @Parameter(names = "--password", description = "The password", password = false, hidden = true)
         public String password = prefsHandler != null ? new String(
-                prefsHandler.getPassword()) : null;
+                prefsHandler.getPasswordExplicit()) : null;
 
         @Parameter(names = { "-p", "--port" }, description = "The port on which the Concourse Server is listening")
         public int port = prefsHandler != null ? prefsHandler.getPort() : 1717;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -65,6 +65,14 @@ public class ConcourseClientPreferences extends PreferencesHandler {
     private static final String DEFAULT_ENVIRONMENT = "";
 
     /**
+     * An empty char array to return if there is no password defined in the
+     * prefs file during a call to {@link #getPasswordExplicit()}.
+     */
+    protected static final char[] NO_PASSWORD_DEFINED = new char[0]; // visible
+                                                                     // for
+                                                                     // testing
+
+    /**
      * Construct a new instance.
      * 
      * @param file the absolute path to the preferences file (relative paths
@@ -107,6 +115,30 @@ public class ConcourseClientPreferences extends PreferencesHandler {
      */
     public char[] getPassword() {
         return getString("password", DEFAULT_PASSWORD).toCharArray();
+    }
+
+    /**
+     * Return the value associated with the {@code password} key, if it is
+     * explicitly defined in the prefs file. Unlike the {@link #getPassword()}
+     * method, this one will not return the default password if one is not
+     * explicitly defined in the file.
+     * <p>
+     * <strong>NOTE</strong>: This method returns the password as a char array
+     * so that the caller can null out the data immediately after use. This is
+     * generally advised to limit the amount of time that the sensitive data
+     * remains in memory.
+     * </p>
+     * 
+     * @return the password or an empty character array if it is not defined
+     */
+    public char[] getPasswordExplicit() {
+        String password = getString("password");
+        if(password != null) {
+            return password.toCharArray();
+        }
+        else {
+            return NO_PASSWORD_DEFINED;
+        }
     }
 
     /**

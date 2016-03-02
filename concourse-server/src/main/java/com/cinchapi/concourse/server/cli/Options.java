@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -59,7 +59,7 @@ public abstract class Options {
     public String username = prefs != null ? prefs.getUsername() : "admin";
 
     @Parameter(names = "--password", description = "The password", hidden = true)
-    public String password = prefs != null ? new String(prefs.getPassword())
+    public String password = prefs != null ? new String(prefs.getPasswordExplicit())
             : null;
 
 }

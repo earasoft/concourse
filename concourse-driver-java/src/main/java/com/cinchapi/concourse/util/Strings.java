@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ import javax.annotation.Nullable;
 
 import org.slf4j.helpers.MessageFormatter;
 
+import com.cinchapi.common.base.Characters;
 import com.google.common.base.MoreObjects;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
@@ -38,6 +39,48 @@ import com.google.gson.JsonParseException;
  * @author Jeff Nelson
  */
 public final class Strings {
+
+    /**
+     * Ensure that {@code string} ends with {@code suffix} by appending it to
+     * {@code string} if and only if it is not already the last sequence of
+     * characters in the string.
+     * 
+     * @param string the {@link String} to that should end with {@code suffix}
+     * @param suffix the {@link String} of characters with which {@code string}
+     *            should end
+     * @return {@code string} if it already ends with {@code suffix} or a new
+     *         {@link String} that contains {@code suffix} appended to
+     *         {@code string}
+     */
+    public static String ensureEndsWith(String string, String suffix) {
+        if(string.endsWith(suffix)) {
+            return string;
+        }
+        else {
+            return joinSimple(string, suffix);
+        }
+    }
+
+    /**
+     * Ensure that {@code string} starts with {@code prefix} by prepending it to
+     * {@code string} if and only if it is not already the first sequence of
+     * characters in the string.
+     * 
+     * @param string the {@link String} to that should start with {@code prefix}
+     * @param prefix the {@link String} of characters with which {@code string}
+     *            should start
+     * @return {@code string} if it already begins with {@code prefix} or a new
+     *         {@link String} that contains {@code prefix} prepended to
+     *         {@code string}
+     */
+    public static String ensureStartsWith(String string, String prefix) {
+        if(string.startsWith(prefix)) {
+            return string;
+        }
+        else {
+            return joinSimple(prefix, string);
+        }
+    }
 
     /**
      * Ensure that {@code string} is surrounded by quotes. If that is not the
@@ -57,6 +100,73 @@ public final class Strings {
     }
 
     /**
+     * Wrap {@code string} within quotes if it is necessary to do so. Otherwise,
+     * return the original {@code string}.
+     * 
+     * <p>
+     * The original {@code string} will be wrapped in quotes and returned as
+     * such if:
+     * <ul>
+     * <li>it is not already wrapped {@link #isWithinQuotes(String) within
+     * quotes}, and</li>
+     * <li>{@code delimiter} appears at least once</li>
+     * </ul>
+     * If those conditions are met, the original string will be wrapped in
+     * either
+     * <ul>
+     * <li>double quotes if a single quote appears in the original string, or</li>
+     * <li>single quotes if a double quote appears in the original string, or</li>
+     * <li>double quotes if both a single and double quote appear in the
+     * original string; furthermore, all instances of double quotes within the
+     * original string will be escaped</li>
+     * </ul>
+     * </p>
+     * 
+     * @param string the string to potentially quote
+     * @param delimiter the delimiter that determines whether quoting should
+     *            happen
+     * @return the original {@code string} or a properly quoted alternative
+     */
+    public static String ensureWithinQuotesIfNeeded(String string,
+            char delimiter) {
+        boolean foundDouble = false;
+        boolean foundSingle = false;
+        boolean foundDelimiter = false;
+        StringBuilder escaped = new StringBuilder();
+        escaped.append('"');
+        if(!isWithinQuotes(string)) {
+            char[] chars = string.toCharArray();
+            for (int i = 0; i < chars.length; ++i) {
+                char c = chars[i];
+                if(c == delimiter) {
+                    foundDelimiter = true;
+                }
+                else if(c == '"') {
+                    foundDouble = true;
+                    escaped.append('\\');
+                }
+                else if(c == '\'') {
+                    foundSingle = true;
+                }
+                escaped.append(c);
+            }
+            escaped.append('"');
+            if(foundDelimiter) {
+                if(foundDouble && foundSingle) {
+                    return escaped.toString();
+                }
+                else if(foundDouble) {
+                    return Strings.format("'{}'", string);
+                }
+                else { // foundSingle or found no quotes
+                    return Strings.format("\"{}\"", string);
+                }
+            }
+        }
+        return string;
+    }
+
+    /**
      * Efficiently escape inner occurrences of each of the {@code characters}
      * within the {@code string}, if necessary.
      * <p>
@@ -73,6 +183,7 @@ public final class Strings {
      */
     public static String escapeInner(String string, char... characters) {
         char c = '\0';
+        char pchar = '\0';
         StringBuilder sb = null;
         Set<Character> chars = null;
         if(characters.length == 1) {
@@ -90,14 +201,23 @@ public final class Strings {
         while (i < schars.length) {
             if(i > 0 && i < schars.length - 1) {
                 char schar = schars[i];
-                if((c != '\0' && c == schar)
-                        || (chars != null && chars.contains(schar))) {
+                if(pchar != '\\'
+                        && ((c != '\0' && c == schar) || (chars != null && chars
+                                .contains(schar)))) {
                     sb = MoreObjects.firstNonNull(sb, new StringBuilder());
                     sb.append(schars, offset, i - offset);
                     sb.append('\\');
-                    sb.append(schar);
+                    char escaped = Characters
+                            .getEscapedCharOrNullLiteral(schar);
+                    if(escaped != '0') {
+                        sb.append(escaped);
+                    }
+                    else {
+                        sb.append(schar);
+                    }
                     offset = i + 1;
                 }
+                pchar = schar;
             }
             ++i;
         }
@@ -108,6 +228,47 @@ public final class Strings {
         else {
             return string;
         }
+    }
+
+    /**
+     * Replace all instances of "confusable" unicode characters with a
+     * canoncial/normalized character.
+     * <p>
+     * See <a href=
+     * "http://www.unicode.org/Public/security/revision-03/confusablesSummary.txt"
+     * >http://www.unicode.org/Public/security/revision-03/confusablesSummary.
+     * txt</a> for a list of characters that are considered to be confusable.
+     * </p>
+     * 
+     * @param string the {@link String} in which the replacements should occur
+     * @return a {@link String} free of confusable unicode characters
+     */
+    public static String replaceUnicodeConfusables(String string) {
+        char[] chars = string.toCharArray();
+        for (int i = 0; i < chars.length; ++i) {
+            char c = chars[i];
+            switch (c) {
+            default:
+                break;
+            case 'ʺ':
+            case '˝':
+            case 'ˮ':
+            case '˶':
+            case 'ײ':
+            case '״':
+            case '“':
+            case '”':
+            case '‟':
+            case '″':
+            case '‶':
+            case '〃':
+            case '＂':
+                c = '"';
+                break;
+            }
+            chars[i] = c;
+        }
+        return String.valueOf(chars);
     }
 
     /**
@@ -235,7 +396,7 @@ public final class Strings {
      * @return {@code true} if the string is between quotes
      */
     public static boolean isWithinQuotes(String string) {
-        if(string.length() >= 2) {
+        if(string.length() > 2) {
             char first = string.charAt(0);
             if(first == '"' || first == '\'') {
                 char last = string.charAt(string.length() - 1);
@@ -434,7 +595,15 @@ public final class Strings {
                     continue;
                 }
                 else if(c == '.') {
-                    decimal = true;
+                    if(!decimal && size > 1) {
+                        decimal = true;
+                    }
+                    else {
+                        // Since we've already seen a decimal, the appearance of
+                        // another one suggests this is an IP address instead of
+                        // a number
+                        return null;
+                    }
                 }
                 else if(i == size - 1 && c == 'D' && size > 1) {
                     // Respect the convention to coerce numeric strings to
@@ -469,10 +638,9 @@ public final class Strings {
             }
         }
         catch (NullPointerException e) {
-            throw new NumberFormatException(
-                    Strings.format(
-                            "{} appears to be a number cannot be parsed as such",
-                            value));
+            throw new NumberFormatException(Strings.format(
+                    "{} appears to be a number but cannot be parsed as such",
+                    value));
         }
     }
 

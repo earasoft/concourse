@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -167,18 +167,20 @@ public final class FileSystem extends FileOps {
              * Find the next element to be returned from {@link #next()}.
              */
             private void findNext() {
-                File file = null;
-                while (file == null || file.isDirectory()) {
-                    if(position >= files.length) {
-                        file = null;
-                        break;
+                if(files != null) {
+                    File file = null;
+                    while (file == null || file.isDirectory()) {
+                        if(position >= files.length) {
+                            file = null;
+                            break;
+                        }
+                        else {
+                            file = files[position];
+                            position++;
+                        }
                     }
-                    else {
-                        file = files[position];
-                        position++;
-                    }
+                    next = file;
                 }
-                next = file;
             }
 
         };

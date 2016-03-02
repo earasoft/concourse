@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2015 Cinchapi Inc.
+ * Copyright (c) 2013-2016 Cinchapi Inc.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -309,6 +309,9 @@ public final class Convert {
      * @return the converted value
      */
     public static Object stringToJava(String value) {
+        if(value.isEmpty()) {
+            return value;
+        }
         char first = value.charAt(0);
         char last = value.charAt(value.length() - 1);
         Long record;
@@ -542,12 +545,15 @@ public final class Convert {
                         else if(peek == JsonToken.STRING) {
                             String orig = reader.nextString();
                             value = stringToJava(orig);
+                            if(orig.isEmpty()) {
+                                value = orig;
+                            }
                             // If the token looks like a string, it MUST be
                             // converted to a Java string unless it is a
                             // masquerading double or an instance of Thrift
                             // translatable class that has a special string
                             // representation (i.e. Tag, Link)
-                            if(orig.charAt(orig.length() - 1) != 'D'
+                            else if(orig.charAt(orig.length() - 1) != 'D'
                                     && !CLASSES_WITH_ENCODED_STRING_REPR
                                             .contains(value.getClass())) {
                                 value = value.toString();
@@ -577,12 +583,15 @@ public final class Convert {
                     else if(peek0 == JsonToken.STRING) {
                         String orig = reader.nextString();
                         value = stringToJava(orig);
+                        if(orig.isEmpty()) {
+                            value = orig;
+                        }
                         // If the token looks like a string, it MUST be
                         // converted to a Java string unless it is a
                         // masquerading double or an instance of Thrift
                         // translatable class that has a special string
                         // representation (i.e. Tag, Link)
-                        if(orig.charAt(orig.length() - 1) != 'D'
+                        else if(orig.charAt(orig.length() - 1) != 'D'
                                 && !CLASSES_WITH_ENCODED_STRING_REPR
                                         .contains(value.getClass())) {
                             value = value.toString();
@@ -639,7 +648,7 @@ public final class Convert {
     /**
      * These classes have a special encoding that signals that string value
      * should actually be converted to those instances in
-     * {@link #stringToJava(String)}.
+     * {@link #jsonToJava(JsonReader)}.
      */
     @SuppressWarnings("unchecked")
     private static Set<Class<?>> CLASSES_WITH_ENCODED_STRING_REPR = Sets
