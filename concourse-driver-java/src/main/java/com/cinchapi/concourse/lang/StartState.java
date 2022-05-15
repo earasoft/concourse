@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -14,6 +14,10 @@
  * limitations under the License.
  */
 package com.cinchapi.concourse.lang;
+
+import com.cinchapi.ccl.grammar.KeySymbol;
+import com.cinchapi.ccl.grammar.NavigationKeySymbol;
+import com.cinchapi.concourse.validate.Keys;
 
 /**
  * The {@link StartState} marks the logical beginning of a new {@link Criteria}.
@@ -27,7 +31,7 @@ public class StartState extends State {
      * 
      * @param criteria
      */
-    public StartState(Criteria criteria) {
+    public StartState(BuiltCriteria criteria) {
         super(criteria);
     }
 
@@ -57,8 +61,8 @@ public class StartState extends State {
             return group(((BuildableState) criteria).build());
         }
         else {
-            throw new IllegalArgumentException(criteria
-                    + " is not a valid argument for the group method");
+            throw new IllegalArgumentException(
+                    criteria + " is not a valid argument for the group method");
         }
     }
 
@@ -69,7 +73,12 @@ public class StartState extends State {
      * @return the builder
      */
     public KeyState key(String key) {
-        criteria.add(KeySymbol.create(key));
+        if(Keys.isNavigationKey(key)) {
+            criteria.add(new NavigationKeySymbol(key));
+        }
+        else {
+            criteria.add(new KeySymbol(key));
+        }
         return new KeyState(criteria);
     }
 

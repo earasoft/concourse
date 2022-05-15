@@ -1,4 +1,4 @@
-# Copyright (c) 2013-2016 Cinchapi Inc.
+# Copyright (c) 2013-2022 Cinchapi Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -51,6 +51,13 @@ exception InvalidArgumentException {
     1: string message
 }
 
+/*
+ * Signals that an invalid operation occurred.
+ */
+exception InvalidOperationException {
+  1: string message
+}
+
 /**
  * Signals that an unexpected or invalid token was reached while parsing.
  */
@@ -94,3 +101,18 @@ exception SecurityException {
  * </p>
  */
 exception TransactionException {}
+
+/**
+ * Thrown when a managed operation fails.
+ */
+exception ManagementException {
+    1: string message
+}
+
+/**
+ * Thrown when a user attempts an operation for which she has insufficient
+ * permission.
+ */
+exception PermissionException {
+    1: string message
+}

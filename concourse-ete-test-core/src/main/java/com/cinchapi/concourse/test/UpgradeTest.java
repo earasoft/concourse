@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,10 +18,9 @@ package com.cinchapi.concourse.test;
 import java.io.File;
 import java.io.IOException;
 
-import com.cinchapi.concourse.server.ManagedConcourseServer;
+import com.cinchapi.common.base.CheckedExceptions;
 import com.cinchapi.concourse.util.ConcourseCodebase;
 import com.cinchapi.concourse.util.Processes;
-import com.google.common.base.Throwables;
 import com.google.common.io.Files;
 
 /**
@@ -50,26 +49,25 @@ public abstract class UpgradeTest extends ClientServerTest {
             ConcourseCodebase codebase = ConcourseCodebase.cloneFromGithub();
             String installer = codebase.buildInstaller();
             File src = new File(installer);
-            File dest = new File(server.getInstallDirectory()
-                    + "/concourse-server.bin");
+            File dest = new File(
+                    server.getInstallDirectory() + "/concourse-server.bin");
             Files.copy(src, dest);
             // Run the upgrade from the installer
             log.info("Upgrading Concourse Server...");
             Process proc = new ProcessBuilder("sh", dest.getAbsolutePath(),
-                    "--", "skip-integration").directory(
-                    new File(server.getInstallDirectory())).start();
+                    "--", "skip-integration")
+                            .directory(new File(server.getInstallDirectory()))
+                            .start();
 
             Processes.waitForSuccessfulCompletion(proc);
             for (String line : Processes.getStdOut(proc)) {
                 log.info(line);
             }
-            server = ManagedConcourseServer.manageExistingServer(server
-                    .getInstallDirectory());
             server.start();
             client = server.connect();
         }
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 

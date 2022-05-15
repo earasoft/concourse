@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -17,11 +17,10 @@ package com.cinchapi.concourse.test;
 
 import java.io.File;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 
 import javax.annotation.Nullable;
-
-import com.cinchapi.concourse.Concourse;
 
 import org.junit.Rule;
 import org.junit.rules.TestWatcher;
@@ -29,11 +28,13 @@ import org.junit.runner.Description;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.cinchapi.common.base.AnyStrings;
+import com.cinchapi.common.base.CheckedExceptions;
+import com.cinchapi.concourse.Concourse;
+import com.cinchapi.concourse.plugin.build.PluginBundleGenerator;
 import com.cinchapi.concourse.server.ManagedConcourseServer;
-import com.cinchapi.concourse.server.ManagedConcourseServer.LogLevel;
 import com.cinchapi.concourse.util.ConcourseCodebase;
 import com.google.common.base.Strings;
-import com.google.common.base.Throwables;
 
 /**
  * A {@link ClientServerTest} is one that interacts with a Concourse server via
@@ -58,6 +59,12 @@ public abstract class ClientServerTest {
     }
 
     /**
+     * A constant that indicates the latest version should be used in
+     * {@link #getServerVersion()}.
+     */
+    public final static String LATEST_SNAPSHOT_VERSION = "latest";
+
+    /**
      * The client allows the subclass to define tests that perform actions
      * against the test {@link #server} using the public API.
      */
@@ -78,22 +85,33 @@ public abstract class ClientServerTest {
     public final TestWatcher __watcher = new TestWatcher() {
 
         @Override
+        protected void succeeded(Description description) {
+            server.destroy();
+        }
+
+        @Override
         protected void failed(Throwable t, Description description) {
-            System.out.println("TEST FAILURE in " + description.getMethodName()
+            System.err.println("TEST FAILURE in " + description.getMethodName()
                     + ": " + t.getMessage());
-            System.out.println("---");
-            System.out.println(Variables.dump());
-            System.out.println("");
-            System.out.println("Printing relevant server logs...");
-            server.printLogs(LogLevel.ERROR, LogLevel.WARN);
-            server.printLog("console");
+            System.err.println("---");
+            System.err.println(Variables.dump());
+            if(PluginTest.class
+                    .isAssignableFrom(ClientServerTest.this.getClass())) {
+
+            }
+            System.err.println(AnyStrings.format(
+                    "NOTE: The test failed, so the server installation at {} has "
+                            + "NOT been deleted. Please manually delete the directory after "
+                            + "inspecting its content",
+                    server.getInstallDirectory()));
+            server.destroyOnExit(false);
+            server.stop();
         }
 
         @Override
         protected void finished(Description description) {
             afterEachTest();
             client.exit();
-            server.destroy();
             client = null;
             server = null;
         }
@@ -111,15 +129,17 @@ public abstract class ClientServerTest {
                                                               // appropriate
                                                               // File for
                                                               // construction
-                server = ManagedConcourseServer.manageNewServer(new File(
-                        getServerVersion()));
+                server = ManagedConcourseServer
+                        .manageNewServer(new File(getServerVersion()));
             }
-            else if(getServerVersion().equalsIgnoreCase("latest")) {
+            else if(getServerVersion()
+                    .equalsIgnoreCase(LATEST_SNAPSHOT_VERSION)) {
                 ConcourseCodebase codebase = ConcourseCodebase
                         .cloneFromGithub();
                 try {
-                    log.info("Creating an installer for the latest "
-                            + "version using the code in {}",
+                    log.info(
+                            "Creating an installer for the latest "
+                                    + "version using the code in {}",
                             codebase.getPath());
                     String installer = codebase.buildInstaller();
                     if(!Strings.isNullOrEmpty(installer)) {
@@ -132,7 +152,7 @@ public abstract class ClientServerTest {
                     }
                 }
                 catch (Exception e) {
-                    throw Throwables.propagate(e);
+                    throw CheckedExceptions.wrapAsRuntimeException(e);
                 }
             }
             else if(installerPath() == null) {
@@ -143,7 +163,18 @@ public abstract class ClientServerTest {
                 server = ManagedConcourseServer
                         .manageNewServer(installerPath());
             }
+            Path pluginBundlePath = null;
+            if(PluginTest.class
+                    .isAssignableFrom(ClientServerTest.this.getClass())) {
+                // Turn the current codebase into a plugin bundle and place it
+                // inside the install directory
+                log.info("Generating plugin to install in Concourse Server");
+                pluginBundlePath = PluginBundleGenerator.generateBundleZip();
+            }
             server.start();
+            if(pluginBundlePath != null) {
+                server.installPlugin(pluginBundlePath);
+            }
             client = server.connect();
             beforeEachTest();
         }

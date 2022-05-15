@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,233 +15,268 @@
  */
 package com.cinchapi.concourse.server.storage.db;
 
+import static com.cinchapi.concourse.server.GlobalState.*;
+
 import java.io.File;
-import java.io.FilenameFilter;
 import java.io.IOException;
-import java.lang.reflect.Constructor;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.ListIterator;
 import java.util.Map;
+import java.util.Map.Entry;
+import java.util.NoSuchElementException;
 import java.util.Set;
-import java.util.SortedMap;
+import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import javax.annotation.Nullable;
-import javax.annotation.concurrent.GuardedBy;
 import javax.annotation.concurrent.ThreadSafe;
 
+import com.cinchapi.common.base.AnyStrings;
+import com.cinchapi.common.base.ArrayBuilder;
+import com.cinchapi.common.base.CheckedExceptions;
+import com.cinchapi.common.base.Verify;
+import com.cinchapi.common.collect.concurrent.ThreadFactories;
 import com.cinchapi.concourse.annotate.Restricted;
 import com.cinchapi.concourse.server.GlobalState;
-import com.cinchapi.concourse.server.concurrent.ConcourseExecutors;
+import com.cinchapi.concourse.server.concurrent.AwaitableExecutorService;
+import com.cinchapi.concourse.server.concurrent.NoOpScheduledExecutorService;
 import com.cinchapi.concourse.server.io.Composite;
 import com.cinchapi.concourse.server.io.FileSystem;
 import com.cinchapi.concourse.server.jmx.ManagedOperation;
-import com.cinchapi.concourse.server.model.PrimaryKey;
+import com.cinchapi.concourse.server.model.Identifier;
+import com.cinchapi.concourse.server.model.Position;
 import com.cinchapi.concourse.server.model.TObjectSorter;
 import com.cinchapi.concourse.server.model.Text;
 import com.cinchapi.concourse.server.model.Value;
-import com.cinchapi.concourse.server.storage.Action;
-import com.cinchapi.concourse.server.storage.BaseStore;
-import com.cinchapi.concourse.server.storage.Functions;
-import com.cinchapi.concourse.server.storage.PermanentStore;
+import com.cinchapi.concourse.server.storage.DurableStore;
+import com.cinchapi.concourse.server.storage.Memory;
+import com.cinchapi.concourse.server.storage.WriteStreamProfiler;
+import com.cinchapi.concourse.server.storage.cache.NoOpCache;
+import com.cinchapi.concourse.server.storage.db.compaction.Compactor;
+import com.cinchapi.concourse.server.storage.db.compaction.NoOpCompactor;
+import com.cinchapi.concourse.server.storage.db.compaction.similarity.SimilarityCompactor;
+import com.cinchapi.concourse.server.storage.db.kernel.CorpusArtifact;
+import com.cinchapi.concourse.server.storage.db.kernel.Segment;
+import com.cinchapi.concourse.server.storage.db.kernel.Segment.Receipt;
+import com.cinchapi.concourse.server.storage.db.kernel.SegmentLoadingException;
 import com.cinchapi.concourse.server.storage.temp.Buffer;
 import com.cinchapi.concourse.server.storage.temp.Write;
-import com.cinchapi.concourse.thrift.Operator;
 import com.cinchapi.concourse.thrift.TObject;
-import com.cinchapi.concourse.time.Time;
+import com.cinchapi.concourse.thrift.TObject.Aliases;
 import com.cinchapi.concourse.util.Comparators;
 import com.cinchapi.concourse.util.Logger;
-import com.cinchapi.concourse.util.NaturalSorter;
-import com.cinchapi.concourse.util.ReadOnlyIterator;
-import com.cinchapi.concourse.util.TLists;
 import com.cinchapi.concourse.util.TStrings;
 import com.cinchapi.concourse.util.Transformers;
+import com.google.common.base.Functions;
 import com.google.common.base.Preconditions;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
+import com.google.common.cache.CacheStats;
+import com.google.common.collect.HashMultimap;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableMultimap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
-import com.google.common.hash.Hashing;
-import com.google.common.io.Files;
-
-import static com.cinchapi.concourse.server.GlobalState.*;
+import com.google.common.collect.Multimap;
+import com.google.common.collect.Streams;
+import com.google.common.collect.TreeMultimap;
+import com.google.common.hash.HashCode;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 /**
- * The {@code Database} is the {@link PermanentStore} for data. The
- * Database accepts {@link Write} objects that are initially stored in a
- * {@link Buffer} and converts them to {@link Revision} objects that are stored
- * in various {@link Block} objects, which provide indexed views for optimized
- * reads.
+ * The {@link Database} is the {@link Engine Engine's} {@link DurableStore}
+ * for data. The Database accepts {@link Write} objects that are initially
+ * stored in a {@link Buffer} and converts them {@link Revision Revisions} that
+ * are stored within distinct {@link Segment Segments}. Each {@link Segment} is
+ * broken up into {@link Chunk Chunks} that provided optimized read-views.
+ * <p>
+ * Conceptually, the {@link Database} is a collection of three sparse, but
+ * contiguous data repositories:
+ * <ul>
+ * <li>a <strong>table</strong> that contains a normalized view of data (similar
+ * to an RDBMS table),
+ * <li>an <strong>index</strong> that contains an inverted view of data (similar
+ * to an RDBMS index), and
+ * <li>a <strong>corpus</strong> that contains a searchable view of
+ * {@link Value#isCharSequenceType() string-like} data
+ * </ul>
+ * While these conceptual repositories aren't actually maintained, the
+ * {@link Revision Revisions} stored across the {@link Segment Segments} allows
+ * for the ad-hoc accumulation of {@link TableRecord TableRecords},
+ * {@link IndexRecord IndexRecords}, and {@link CorpusRecord CorpusRecords} to
+ * service read requests efficiently.
+ * </p>
  * 
  * @author Jeff Nelson
  */
 @ThreadSafe
-public final class Database extends BaseStore implements PermanentStore {
+public final class Database implements DurableStore {
 
     /**
-     * Return an {@link Iterator} that will iterate over all of the
-     * {@link PrimaryRevision PrimaryRevisions} that are stored in the
-     * {@code dbStore}. The iterator streams the revisions directly from disk
-     * using a buffer size that is equal to {@link GlobalState#BUFFER_PAGE_SIZE}
-     * so it should have a predictable memory footprint.
+     * Return a {@link ThreadFactory} that produces threads to run compaction
+     * jobs.
      * 
-     * @param dbStore
-     * @return the iterator
+     * @param environment
+     * @param compactionType
+     * @return the {@link ThreadFactory}
      */
-    public static Iterator<Revision<PrimaryKey, Text, Value>> onDiskStreamingIterator(
-            final String dbStore) {
-        return new ReadOnlyIterator<Revision<PrimaryKey, Text, Value>>() {
-
-            private final String backingStore = FileSystem.makePath(dbStore,
-                    PRIMARY_BLOCK_DIRECTORY);
-            private final Iterator<String> fileIt = FileSystem
-                    .fileOnlyIterator(backingStore);
-            private Iterator<Revision<PrimaryKey, Text, Value>> it = null;
-            {
-                flip();
-            }
-
-            @Override
-            public boolean hasNext() {
-                if(it == null) {
-                    return false;
-                }
-                else if(!it.hasNext() && fileIt.hasNext()) {
-                    flip();
-                    return hasNext();
-                }
-                else if(!it.hasNext()) {
-                    return false;
-                }
-                else {
-                    return true;
-                }
-            }
-
-            @Override
-            public Revision<PrimaryKey, Text, Value> next() {
-                if(hasNext()) {
-                    return it.next();
-                }
-                else {
-                    return null;
-                }
-            }
-
-            private void flip() {
-                if(fileIt.hasNext()) {
-                    String file = fileIt.next();
-                    if(file.endsWith(Block.BLOCK_NAME_EXTENSION)) {
-                        String id = Block.getId(file);
-                        it = new PrimaryBlock(id, backingStore, true)
-                                .iterator(); /* authorized */
-                    }
-                    else {
-                        flip();
-                    }
-                }
-            }
-
-        };
+    private static ThreadFactory createCompactionThreadFactory(
+            String environment, String compactionType) {
+        ThreadFactoryBuilder factory = new ThreadFactoryBuilder();
+        factory.setDaemon(true);
+        factory.setNameFormat(AnyStrings.format("{}Compaction [{}]",
+                compactionType, environment));
+        factory.setPriority(Thread.MIN_PRIORITY);
+        factory.setUncaughtExceptionHandler((thread, exception) -> {
+            Logger.error("Uncaught exception in {}:", thread.getName(),
+                    exception);
+            Logger.error(
+                    "{} has STOPPED WORKING due to an unexpected exception. {} compaction is paused until the error is resolved",
+                    thread.getName(), compactionType);
+        });
+        return factory.build();
     }
 
     /**
-     * Return a cache for records of type {@code T}.
+     * Return the {@link Segment} identified by {@code id} if it exists within
+     * the collection of {@code segments}. If it doesn't return {@code null}.
      * 
-     * @return the cache
-     */
-    private static <T> Cache<Composite, T> buildCache() {
-        return CacheBuilder.newBuilder().maximumSize(100000).softValues()
-                .build();
-    }
-
-    /**
-     * Return the Block identified by {@code id} if it exists in {@code list},
-     * otherwise {@code null}.
-     * 
-     * @param list
+     * @param segments
      * @param id
-     * @return the Block identified by {@code id} or {@code null}
+     * @return the {@link Segment} identified by {@code id} or {@code null}
      */
     @Nullable
-    private static <T extends Block<?, ?, ?>> T findBlock(List<T> list,
+    private static Segment findSegment(Collection<Segment> segments,
             String id) {
-        // TODO: use binary search, since the ids of the list are sorted...this
-        // may require making Blocks comparable by id
-        for (T block : list) {
-            if(block.getId().equals(id)) {
-                return block;
+        for (Segment segment : segments) {
+            if(segment.id().equals(id)) {
+                return segment;
             }
         }
         return null;
     }
 
-    private static final String threadNamePrefix = "database-write-thread";
-
-    /*
-     * BLOCK DIRECTORIES
-     * -----------------
-     * Each Block type is stored in its own directory so that we can reduce the
-     * number of files in a single directory. It is important to note that the
-     * filename extensions for files are the same across directories (i.e. 'blk'
-     * for block, 'fltr' for bloom filter and 'indx' for index). Furthermore,
-     * blocks that are synced at the same time all have the same block id.
-     * Therefore, the only way to distinguish blocks of different types from one
-     * another is by the directory in which they are stored.
+    /**
+     * Return if {@link #corpusCaches} does not contain a cache for a key.
      */
-    private static final String PRIMARY_BLOCK_DIRECTORY = "cpb";
-    private static final String SEARCH_BLOCK_DIRECTORY = "ctb";
-    private static final String SECONDARY_BLOCK_DIRECTORY = "csb";
+    private static final Cache<Composite, CorpusRecord> DISABLED_CORPUS_CACHE = new NoOpCache<>();
 
     /**
-     * A flag to indicate if the Database has verified the data it is seeing is
-     * acceptable. We use this flag to handle the case where the server
-     * unexpectedly crashes before removing a Buffer page and tries to transport
-     * Writes that have already been accepted. The SLA for this flag is that the
-     * Database will assume no Writes are acceptable (and will therefore
-     * manually verify) until it sees one, at which point it will assume all
-     * subsequent Writes are acceptable.
+     * Global flag that indicates if compaction is enabled.
      */
-    private transient boolean acceptable = false;
+    // Copied here as a final variable for (hopeful) performance gains.
+    private static final boolean ENABLE_COMPACTION = GlobalState.ENABLE_COMPACTION;
+
+    /**
+     * Global flag that indicates if search data is cached.
+     */
+    // Copied here as a final variable for (hopeful) performance gains.
+    private static final boolean ENABLE_SEARCH_CACHE = GlobalState.ENABLE_SEARCH_CACHE;
+
+    /**
+     * Global flag that indicates if {@link #verify(String, TObject, long)} uses
+     * {@link #getLookupRecord(Identifier, Text, Value) lookup records}.
+     */
+    // Copied here as a final variable for (hopeful) performance gains.
+    private static final boolean ENABLE_VERIFY_BY_LOOKUP = GlobalState.ENABLE_VERIFY_BY_LOOKUP;
+
+    /**
+     * The initial number of seconds to wait, after the {@link Database}
+     * {@link #start() starts} to run a full compaction.
+     */
+    private static long FULL_COMPACTION_INITIAL_DELAY_IN_SECONDS = TimeUnit.SECONDS
+            .convert(1, TimeUnit.DAYS);
+
+    /**
+     * The number of seconds to wait in between full compactions.
+     */
+    private static long FULL_COMPACTION_RUN_FREQUENCY_IN_SECONDS = TimeUnit.SECONDS
+            .convert(7, TimeUnit.DAYS);
+
+    /**
+     * The initial number of seconds to wait, after the {@link Database}
+     * {@link #start() starts} to run an incremental compaction.
+     */
+    private static long INCREMENTAL_COMPACTION_INITIAL_DELAY_IN_SECONDS = 30;
+
+    /**
+     * The number of seconds to wait in between incremental compactions.
+     */
+    private static long INCREMENTAL_COMPACTION_RUN_FREQUENCY_IN_SECONDS = 2;
+
+    /**
+     * The subdirectory of {@link #directory} where the {@link Segment} files
+     * are stored.
+     */
+    private static final String SEGMENTS_SUBDIRECTORY = "segments";
+
+    /**
+     * The {@link Compactor} that performs compaction.
+     */
+    private transient Compactor compactor;
+
+    /**
+     * Corpus Cache
+     * ------------
+     * Caching for {@link CorpusRecord CorpusRecords} are segmented by key. This
+     * is done in an attempt to avoid attempting cache updates for every infix
+     * of a value when it is known that no search caches exist for the key from
+     * which the value is mapped (e.g. we are indexing a term for a key that
+     * isn't being searched).
+     */
+    private final Map<Text, Cache<Composite, CorpusRecord>> corpusCaches = ENABLE_SEARCH_CACHE
+            ? new ConcurrentHashMap<>()
+            : ImmutableMap.of();
 
     /**
      * The location where the Database stores data.
      */
-    private final transient String backingStore;
+    private final transient Path directory;
 
-    /*
-     * BLOCK COLLECTIONS
-     * -----------------
-     * We maintain a collection to all the blocks, in chronological order, so
-     * that we can seek for the necessary revisions to populate a requested
-     * record.
+    /**
+     * Runs full compaction in the background.
      */
-    private final transient List<PrimaryBlock> cpb = Lists.newArrayList();
-    private final transient List<SecondaryBlock> csb = Lists.newArrayList();
-    private final transient List<SearchBlock> ctb = Lists.newArrayList();
+    private transient ScheduledExecutorService fullCompaction;
 
-    /*
-     * CURRENT BLOCK POINTERS
-     * ----------------------
-     * We hold direct references to the current blocks. These pointers change
-     * whenever the database triggers a sync operation.
+    /**
+     * Runs incremental compaction in the background.
      */
-    private transient PrimaryBlock cpb0;
-    private transient SecondaryBlock csb0;
-    private transient SearchBlock ctb0;
+    private transient ScheduledExecutorService incrementalCompaction;
 
-    /*
-     * RECORD CACHES
-     * -------------
+    /**
+     * Index Cache
+     * -----------
      * Records are cached in memory to reduce the number of seeks required. When
      * writing new revisions, we check the appropriate caches for relevant
      * records and append the new revision so that the cached data doesn't grow
      * stale.
+     * 
+     * The caches are only populated if the Database is #running (see
+     * #accept(Write)). Attempts to get a Record when the Database is not
+     * running will ignore the cache by virtue of an internal wrapper that has
+     * the appropriate detection.
      */
-    private final Cache<Composite, PrimaryRecord> cpc = buildCache();
-    private final Cache<Composite, PrimaryRecord> cppc = buildCache();
-    private final Cache<Composite, SecondaryRecord> csc = buildCache();
+    private final Cache<Composite, IndexRecord> indexCache = buildCache();
 
     /**
      * Lock used to ensure the object is ThreadSafe. This lock provides access
@@ -250,9 +285,81 @@ public final class Database extends BaseStore implements PermanentStore {
     private final transient ReentrantReadWriteLock masterLock = new ReentrantReadWriteLock();
 
     /**
+     * A live view into the {@link Database Database's} memory.
+     */
+    private CacheState memory;
+
+    /**
      * A flag to indicate if the Buffer is running or not.
      */
     private transient boolean running = false;
+    /**
+     * We hold direct references to the current Segment. This pointer changes
+     * whenever the database triggers a sync operation.
+     */
+    private transient Segment seg0;
+
+    /**
+     * <p>
+     * A collection of all the segments, in manually sorted chronological order,
+     * so that we can seek for the necessary revisions and populate a requested
+     * record.
+     * </p>
+     * 
+     * <p>
+     * <strong>NOTE:</strong> We maintain the #segments in a List (instead
+     * of a SortedSet) because a newly added Segment is always "greater" than an
+     * existing Segment. The only time Segments are not added in monotonically
+     * increasing order is when they are loaded when the database #start()s.
+     * </p>
+     */
+    private final transient List<Segment> segments = Lists.newArrayList();
+
+    /**
+     * The underlying {@link Storage}.
+     */
+    private final transient Storage storage;
+
+    /**
+     * Table Cache
+     * -----------
+     * Records are cached in memory to reduce the number of seeks required. When
+     * writing new revisions, we check the appropriate caches for relevant
+     * records and append the new revision so that the cached data doesn't grow
+     * stale.
+     * 
+     * The caches are only populated if the Database is #running (see
+     * #accept(Write)). Attempts to get a Record when the Database is not
+     * running will ignore the cache by virtue of an internal wrapper that has
+     * the appropriate detection.
+     */
+    private final Cache<Composite, TableRecord> tableCache = buildCache();
+
+    /**
+     * Partial Table Cache
+     * -------------------
+     * Records are cached in memory to reduce the number of seeks required. When
+     * writing new revisions, we check the appropriate caches for relevant
+     * records and append the new revision so that the cached data doesn't grow
+     * stale.
+     * 
+     * The caches are only populated if the Database is #running (see
+     * #accept(Write)). Attempts to get a Record when the Database is not
+     * running will ignore the cache by virtue of an internal wrapper that has
+     * the appropriate detection.
+     */
+    private final Cache<Composite, TableRecord> tablePartialCache = buildCache();
+
+    /**
+     * A "tag" used to identify the Database's affiliations (e.g. environment).
+     */
+    private transient String tag = "";
+
+    /**
+     * An {@link ExecutorService} that is passed to {@link #seg0} to handle
+     * writing tasks asynchronously in the background.
+     */
+    private transient AwaitableExecutorService writer;
 
     /**
      * Construct a Database that is backed by the default location which is in
@@ -268,105 +375,130 @@ public final class Database extends BaseStore implements PermanentStore {
      * The {@link backingStore} is passed to each {@link Record} as the
      * {@code parentStore}.
      * 
-     * @param backingStore
+     * @param directory
      */
-    public Database(String backingStore) {
-        this.backingStore = backingStore;
+    public Database(Path directory) {
+        this.directory = directory;
+        this.storage = new Storage(directory.resolve(SEGMENTS_SUBDIRECTORY),
+                segments, masterLock.writeLock());
+    }
+
+    /**
+     * Construct a Database that is backed by {@link backingStore} directory.
+     * The {@link backingStore} is passed to each {@link Record} as the
+     * {@code parentStore}.
+     * 
+     * @param directory
+     */
+    public Database(String directory) {
+        this(Paths.get(directory));
     }
 
     @Override
     public void accept(Write write) {
-        // CON-83: Keeping manually verifying writes until we find one that is
-        // acceptable, after which assume all subsequent writes are acceptable.
-        if(!acceptable
-                && ((write.getType() == Action.ADD && !verify(write.getKey()
-                        .toString(), write.getValue().getTObject(), write
-                        .getRecord().longValue())) || (write.getType() == Action.REMOVE && verify(
-                        write.getKey().toString(), write.getValue()
-                                .getTObject(), write.getRecord().longValue())))) {
-            acceptable = true;
-        }
-        if(acceptable) {
-            // NOTE: Write locking happens in each individual Block, and
-            // furthermore this method is only called from the Buffer, which
-            // transports data serially.
-            ConcourseExecutors.executeAndAwaitTermination(threadNamePrefix,
-                    new BlockWriter(cpb0, write), new BlockWriter(csb0, write),
-                    new BlockWriter(ctb0, write));
+        // NOTE: This approach is thread safe because write locking happens
+        // in each of #seg0's individual Chunks, and furthermore this method
+        // is only called from the Buffer, which transports data serially.
+        if(running) {
+            try {
+                Receipt receipt = seg0.acquire(write, writer);
+                Logger.debug("Indexed '{}' in {}", write, seg0);
+
+                // Update cached records
+                TableRecord cpr = tableCache
+                        .getIfPresent(receipt.table().getLocatorComposite());
+                TableRecord cppr = tablePartialCache
+                        .getIfPresent(receipt.table().getLocatorKeyComposite());
+                IndexRecord csr = indexCache
+                        .getIfPresent(receipt.index().getLocatorComposite());
+                if(cpr != null) {
+                    cpr.append(receipt.table().revision());
+                }
+                if(cppr != null) {
+                    cppr.append(receipt.table().revision());
+                }
+                if(csr != null) {
+                    csr.append(receipt.index().revision());
+                }
+                if(ENABLE_SEARCH_CACHE) {
+                    Cache<Composite, CorpusRecord> cache = corpusCaches
+                            .get(write.getKey());
+                    if(cache != null) {
+                        for (CorpusArtifact artifact : receipt.corpus()) {
+                            CorpusRecord corpus = cache.getIfPresent(
+                                    artifact.getLocatorKeyComposite());
+                            if(corpus != null) {
+                                corpus.append(artifact.revision());
+                            }
+                        }
+                    }
+                }
+            }
+            catch (InterruptedException e) {
+                Logger.warn(
+                        "The database was interrupted while trying to accept {}. "
+                                + "If the write could not be fully accepted, it will "
+                                + "remain in the buffer and re-tried when the Database is able to accept writes.",
+                        write);
+                Thread.currentThread().interrupt();
+                return;
+            }
         }
         else {
-            Logger.warn("The Engine refused to accept {} because "
-                    + "it appears that the data was already transported. "
-                    + "This indicates that the server shutdown prematurely.",
-                    write);
+            // The #accept method may be called when the database is stopped
+            // during test cases
+            Logger.warn(
+                    "The database is being asked to accept a Write, even though it is not running.");
+            seg0.acquire(write);
         }
     }
 
     @Override
     public void accept(Write write, boolean sync) {
-        // NOTE: The functionality to optionally sync when accepting writes is
-        // not really supported in the Database, but is implemented to conform
-        // with the PermanentStore interface.
-        accept(write);
-        if(sync) {
-            sync();
-        }
-    }
-
-    @Override
-    public Map<Long, String> audit(long record) {
-        return getPrimaryRecord(PrimaryKey.wrap(record)).audit();
-    }
-
-    @Override
-    public Map<Long, String> audit(String key, long record) {
-        Text key0 = Text.wrapCached(key);
-        return getPrimaryRecord(PrimaryKey.wrap(record), key0).audit(key0);
+        // It is never necessary to sync after each Write since syncing is
+        // coordinated by the Engine when a Buffer page has been depleted.
+        throw new UnsupportedOperationException();
     }
 
     @Override
     public Map<TObject, Set<Long>> browse(String key) {
-        return Transformers.transformTreeMapSet(
-                getSecondaryRecord(Text.wrapCached(key)).browse(),
-                Functions.VALUE_TO_TOBJECT, Functions.PRIMARY_KEY_TO_LONG,
-                TObjectSorter.INSTANCE);
+        Text L = Text.wrapCached(key);
+        IndexRecord index = getIndexRecord(L);
+        Map<Value, Set<Identifier>> data = index.getAll();
+        return Transformers.transformTreeMapSet(data, Value::getTObject,
+                Identifier::longValue, TObjectSorter.INSTANCE);
     }
 
     @Override
     public Map<TObject, Set<Long>> browse(String key, long timestamp) {
-        return Transformers.transformTreeMapSet(
-                getSecondaryRecord(Text.wrapCached(key)).browse(timestamp),
-                Functions.VALUE_TO_TOBJECT, Functions.PRIMARY_KEY_TO_LONG,
-                TObjectSorter.INSTANCE);
+        Text L = Text.wrapCached(key);
+        IndexRecord index = getIndexRecord(L);
+        Map<Value, Set<Identifier>> data = index.getAll(timestamp);
+        return Transformers.transformTreeMapSet(data, Value::getTObject,
+                Identifier::longValue, TObjectSorter.INSTANCE);
+    }
+
+    @Override
+    public Map<Long, Set<TObject>> chronologize(String key, long record,
+            long start, long end) {
+        Identifier L = Identifier.of(record);
+        Text K = Text.wrapCached(key);
+        TableRecord table = getTableRecord(L);
+        Map<Long, Set<Value>> data = table.chronologize(K, start, end);
+        return Transformers.transformMapSet(data, Functions.identity(),
+                Value::getTObject);
+    }
+
+    @Override
+    public void compact() {
+        compactor.tryIncrementalCompaction();
     }
 
     @Override
     public boolean contains(long record) {
-        return !getPrimaryRecord(PrimaryKey.wrap(record)).isEmpty();
-    }
-
-    @Override
-    public Map<Long, Set<TObject>> doExplore(long timestamp, String key,
-            Operator operator, TObject... values) {
-        SecondaryRecord record = getSecondaryRecord(Text.wrapCached(key));
-        Map<PrimaryKey, Set<Value>> map = record.explore(timestamp, operator,
-                Transformers.transformArray(values, Functions.TOBJECT_TO_VALUE,
-                        Value.class));
-        return Transformers.transformTreeMapSet(map,
-                Functions.PRIMARY_KEY_TO_LONG, Functions.VALUE_TO_TOBJECT,
-                Comparators.LONG_COMPARATOR);
-    }
-
-    @Override
-    public Map<Long, Set<TObject>> doExplore(String key, Operator operator,
-            TObject... values) {
-        SecondaryRecord record = getSecondaryRecord(Text.wrapCached(key));
-        Map<PrimaryKey, Set<Value>> map = record.explore(operator,
-                Transformers.transformArray(values, Functions.TOBJECT_TO_VALUE,
-                        Value.class));
-        return Transformers.transformTreeMapSet(map,
-                Functions.PRIMARY_KEY_TO_LONG, Functions.VALUE_TO_TOBJECT,
-                Comparators.LONG_COMPARATOR);
+        Identifier L = Identifier.of(record);
+        TableRecord table = getTableRecord(L);
+        return !table.isEmpty();
     }
 
     /**
@@ -378,18 +510,57 @@ public final class Database extends BaseStore implements PermanentStore {
      * @return the block dumps.
      */
     public String dump(String id) {
-        PrimaryBlock _cpb = findBlock(cpb, id);
-        SecondaryBlock _csb = findBlock(csb, id);
-        SearchBlock _ctb = findBlock(ctb, id);
-        Preconditions.checkArgument(_cpb != null && _csb != null,
-                "Insufficient number of blocks identified by %s", id);
+        Segment segment = findSegment(segments, id);
+        Preconditions.checkArgument(segment != null,
+                "No segment identified by %s", id);
         StringBuilder sb = new StringBuilder();
-        sb.append(_cpb.dump());
-        sb.append(_csb.dump());
-        if(_ctb != null) {
-            sb.append(_ctb.dump());
-        }
+        sb.append(segment.table().dump());
+        sb.append(segment.index().dump());
+        sb.append(segment.corpus().dump());
         return sb.toString();
+    }
+
+    @Override
+    public Map<Long, Set<TObject>> explore(String key, Aliases aliases) {
+        Text L = Text.wrapCached(key);
+        IndexRecord index = getIndexRecord(L);
+        Value[] Ks = Transformers.transformArray(aliases.values(), Value::wrap,
+                Value.class);
+        Map<Identifier, Set<Value>> map = index.findAndGet(aliases.operator(),
+                Ks);
+        return Transformers.transformTreeMapSet(map, Identifier::longValue,
+                Value::getTObject, Long::compare);
+    }
+
+    @Override
+    public Map<Long, Set<TObject>> explore(String key, Aliases aliases,
+            long timestamp) {
+        Text L = Text.wrapCached(key);
+        IndexRecord index = getIndexRecord(L);
+        Value[] Ks = Transformers.transformArray(aliases.values(), Value::wrap,
+                Value.class);
+        Map<Identifier, Set<Value>> map = index.findAndGet(timestamp,
+                aliases.operator(), Ks);
+        return Transformers.transformTreeMapSet(map, Identifier::longValue,
+                Value::getTObject, Long::compare);
+    }
+
+    @Override
+    public Set<TObject> gather(String key, long record) {
+        Text L = Text.wrapCached(key);
+        Identifier V = Identifier.of(record);
+        IndexRecord index = getIndexRecord(L);
+        Set<Value> Ks = index.gather(V);
+        return Transformers.transformSet(Ks, Value::getTObject);
+    }
+
+    @Override
+    public Set<TObject> gather(String key, long record, long timestamp) {
+        Text L = Text.wrapCached(key);
+        Identifier V = Identifier.of(record);
+        IndexRecord index = getIndexRecord(L);
+        Set<Value> Ks = index.gather(V, timestamp);
+        return Transformers.transformSet(Ks, Value::getTObject);
     }
 
     /**
@@ -399,7 +570,7 @@ public final class Database extends BaseStore implements PermanentStore {
      */
     @Restricted
     public String getBackingStore() {
-        return backingStore;
+        return directory.toString();
     }
 
     /**
@@ -409,194 +580,406 @@ public final class Database extends BaseStore implements PermanentStore {
      */
     @ManagedOperation
     public List<String> getDumpList() {
-        List<String> ids = Lists.newArrayList();
-        for (PrimaryBlock block : cpb) {
-            ids.add(block.getId());
+        return segments.stream().map(Segment::id).collect(Collectors.toList());
+    }
+
+    /**
+     * Return an {@link Iterator} that provides access to all the
+     * {@link Write Writes} that have been {@link #accept(Write)
+     * accepted}.
+     * 
+     * @return an {@link Iterator} over accepted {@link Write Writes}.
+     */
+    public Iterator<Write> iterator() {
+        return new AcceptedWriteIterator();
+    }
+
+    @Override
+    public Memory memory() {
+        Verify.that(running,
+                "Cannot return the memory of a stopped Database instance");
+        return memory;
+    }
+
+    @Override
+    public void reconcile(Set<HashCode> hashes) {
+        Logger.info("Reconciling the states of the Database and Buffer...");
+        // CON-83, GH-441, GH-442: Check for premature shutdown or crash that
+        // regenerated Segment files based on Write versions that are all still
+        // in the buffer.
+        if(segments.size() > 1) {
+            int index = segments.size() - 2;
+            Segment seg1 = segments.get(index);
+            if(hashes.containsAll(seg1.hashes())) {
+                Logger.warn(
+                        "The data in {} is still completely in the BUFFER so it is being discarded",
+                        seg1);
+                segments.remove(index);
+            }
         }
-        return ids;
+    }
+
+    @Override
+    public void repair() {
+        masterLock.writeLock().lock();
+        try {
+            WriteStreamProfiler<Segment> profiler = new WriteStreamProfiler<>(
+                    segments);
+            Map<Segment, Segment> deduped = profiler
+                    .deduplicate(() -> Segment.create());
+            if(!deduped.isEmpty()) {
+                for (int i = 0; i < segments.size(); ++i) {
+                    Segment segment = segments.get(i);
+                    Segment clean = deduped.get(segment);
+                    if(clean != null) {
+                        clean.transfer(storage.directory()
+                                .resolve(UUID.randomUUID() + ".seg"));
+                        segments.set(i, clean);
+                        segment.delete();
+                    }
+                }
+                int total = profiler.duplicates().size();
+                Logger.warn(
+                        "Replaced {} Segments that contained duplicate data. In total, across all Segments, there were {} Write{} duplicated.",
+                        deduped.size(), total, total != 1 ? "s" : "");
+            }
+        }
+        finally {
+            masterLock.writeLock().unlock();
+        }
+
+    }
+
+    @Override
+    public Map<Long, List<String>> review(long record) {
+        Identifier L = Identifier.of(record);
+        TableRecord table = getTableRecord(L);
+        return table.review();
+    }
+
+    @Override
+    public Map<Long, List<String>> review(String key, long record) {
+        Identifier L = Identifier.of(record);
+        Text K = Text.wrapCached(key);
+        TableRecord table = getTableRecord(L, K);
+        return table.review(K);
     }
 
     @Override
     public Set<Long> search(String key, String query) {
-        return Transformers.transformSet(
-                getSearchRecord(Text.wrapCached(key), Text.wrap(query)).search(
-                        Text.wrap(query)), Functions.PRIMARY_KEY_TO_LONG);
+        // NOTE: Locking must happen here since CorpusRecords are not cached and
+        // search potentially works across multiple ones.
+        masterLock.readLock().lock();
+        try {
+            Text L = Text.wrapCached(key);
+            // Get each word in the query separately to ensure that multi word
+            // search works.
+            String[] words = query.toString().toLowerCase().split(
+                    TStrings.REGEX_GROUP_OF_ONE_OR_MORE_WHITESPACE_CHARS);
+            Multimap<Identifier, Integer> reference = ImmutableMultimap.of();
+            boolean initial = true;
+            int offset = 0;
+            for (String word : words) {
+                if(GlobalState.STOPWORDS.contains(word)) {
+                    // When skipping a stop word, we must record an offset to
+                    // correctly determine if the next term match is in the
+                    // correct relative position to the previous term match
+                    ++offset;
+                    continue;
+                }
+                Text K = Text.wrap(word);
+                CorpusRecord corpus = getCorpusRecord(L, K);
+                Set<Position> appearances = corpus.get(K);
+                Multimap<Identifier, Integer> temp = HashMultimap.create();
+                for (Position appearance : appearances) {
+                    Identifier record = appearance.getIdentifier();
+                    int position = appearance.getIndex();
+                    if(initial) {
+                        temp.put(record, position);
+                    }
+                    else {
+                        for (int current : reference.get(record)) {
+                            if(position == current + 1 + offset) {
+                                temp.put(record, position);
+                            }
+                        }
+                    }
+                }
+                initial = false;
+                reference = temp;
+                offset = 0;
+            }
+
+            // Result Scoring: Scoring is simply the number of times the query
+            // appears in a Record [e.g. the number of Positions mapped from
+            // key: #reference.get(key).size()]. The total number of positions
+            // in #reference is equal to the total number of times a document
+            // appears in the corpus [e.g. reference.asMap().values().size()].
+            Multimap<Integer, Long> sorted = TreeMultimap.create(
+                    Collections.<Integer> reverseOrder(),
+                    Long::compareUnsigned);
+            for (Entry<Identifier, Collection<Integer>> entry : reference
+                    .asMap().entrySet()) {
+                sorted.put(entry.getValue().size(), entry.getKey().longValue());
+            }
+            Set<Long> results = (Set<Long>) sorted.values().stream()
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+            return results;
+        }
+        finally {
+            masterLock.readLock().unlock();
+        }
     }
 
     @Override
     public Map<String, Set<TObject>> select(long record) {
-        return Transformers.transformTreeMapSet(
-                getPrimaryRecord(PrimaryKey.wrap(record)).browse(),
-                Functions.TEXT_TO_STRING, Functions.VALUE_TO_TOBJECT,
+        Identifier L = Identifier.of(record);
+        TableRecord table = getTableRecord(L);
+        Map<Text, Set<Value>> data = table.getAll();
+        return Transformers.transformTreeMapSet(data, Text::toString,
+                Value::getTObject,
                 Comparators.CASE_INSENSITIVE_STRING_COMPARATOR);
     }
 
     @Override
     public Map<String, Set<TObject>> select(long record, long timestamp) {
-        return Transformers.transformTreeMapSet(
-                getPrimaryRecord(PrimaryKey.wrap(record)).browse(timestamp),
-                Functions.TEXT_TO_STRING, Functions.VALUE_TO_TOBJECT,
+        Identifier L = Identifier.of(record);
+        TableRecord table = getTableRecord(L);
+        Map<Text, Set<Value>> data = table.getAll(timestamp);
+        return Transformers.transformTreeMapSet(data, Text::toString,
+                Value::getTObject,
                 Comparators.CASE_INSENSITIVE_STRING_COMPARATOR);
     }
 
     @Override
     public Set<TObject> select(String key, long record) {
-        Text key0 = Text.wrapCached(key);
-        return Transformers.transformSet(
-                getPrimaryRecord(PrimaryKey.wrap(record), key0).fetch(key0),
-                Functions.VALUE_TO_TOBJECT);
+        Identifier L = Identifier.of(record);
+        Text K = Text.wrapCached(key);
+        TableRecord table = getTableRecord(L, K);
+        Set<Value> data = table.get(K);
+        return Transformers.transformSet(data, Value::getTObject);
     }
 
     @Override
     public Set<TObject> select(String key, long record, long timestamp) {
-        Text key0 = Text.wrapCached(key);
-        return Transformers.transformSet(
-                getPrimaryRecord(PrimaryKey.wrap(record), key0).fetch(key0,
-                        timestamp), Functions.VALUE_TO_TOBJECT);
+        Identifier L = Identifier.of(record);
+        Text K = Text.wrapCached(key);
+        TableRecord table = getTableRecord(L, K);
+        Set<Value> data = table.get(K, timestamp);
+        return Transformers.transformSet(data, Value::getTObject);
     }
 
     @Override
     public void start() {
         if(!running) {
+            Logger.info("Database configured to store data in {}", directory);
             running = true;
-            Logger.info("Database configured to store data in {}", backingStore);
-            ConcourseExecutors.executeAndAwaitTerminationAndShutdown(
-                    "Storage Block Loader", new BlockLoader<PrimaryBlock>(
-                            PrimaryBlock.class, PRIMARY_BLOCK_DIRECTORY, cpb),
-                    new BlockLoader<SecondaryBlock>(SecondaryBlock.class,
-                            SECONDARY_BLOCK_DIRECTORY, csb),
-                    new BlockLoader<SearchBlock>(SearchBlock.class,
-                            SEARCH_BLOCK_DIRECTORY, ctb));
+            this.writer = new AwaitableExecutorService(
+                    Executors.newCachedThreadPool(ThreadFactories
+                            .namingThreadFactory("DatabaseWriter")));
+            this.segments.clear();
+            ArrayBuilder<Runnable> tasks = ArrayBuilder.builder();
+            List<Segment> segments = Collections
+                    .synchronizedList(this.segments);
+            Stream<Path> files = storage.files();
+            files.forEach(file -> tasks.add(() -> {
+                try {
+                    Segment segment = Segment.load(file);
+                    segments.add(segment);
+                }
+                catch (SegmentLoadingException e) {
+                    Logger.error("Error when trying to load Segment {}", file);
+                    Logger.error("", e);
+                }
+            }));
+            files.close();
+            if(tasks.length() > 0) {
+                AwaitableExecutorService loader = new AwaitableExecutorService(
+                        Executors.newCachedThreadPool(ThreadFactories
+                                .namingThreadFactory("DatabaseLoader")));
+                try {
+                    loader.await((task, error) -> Logger.error(
+                            "Unexpected error when trying to load Database Segments: {}",
+                            error), tasks.build());
+                }
+                catch (InterruptedException e) {
+                    Logger.error(
+                            "The Database was interrupted while starting...",
+                            e);
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                finally {
+                    loader.shutdown();
+                }
+            }
 
-            // CON-83: Get rid of any blocks that aren't "balanced" (e.g. has
-            // primary and secondary) under the assumption that the server
-            // crashed and the corresponding Buffer page still exists. Please
-            // note that since we do not sync empty blocks, it is possible
-            // that there are some primary and secondary blocks without a
-            // corresponding search one. But, it is also possible that a
-            // legitimate search block is missing because the server crashed
-            // before it was synced, in which case the data that was in that
-            // block is lost because we can't both legitimately avoid syncing
-            // empty (search) blocks and rely on the fact that a search block is
-            // missing to assume that the server crashed. :-/
-            TLists.retainIntersection(cpb, csb);
-            ctb.retainAll(cpb);
-            triggerSync(false);
+            // Sort the segments in chronological order
+            Collections.sort(this.segments, Segment.TEMPORAL_COMPARATOR);
+
+            // Remove segments that overlap. Segments may overlap if they are
+            // duplicates resulting from a botched upgrade or reindex or if they
+            // were involved in an optimization pass, but garbage collection
+            // didn't run before the server shutdown.
+            ListIterator<Segment> lit = segments.listIterator();
+            while (lit.hasNext()) {
+                if(lit.hasPrevious()) {
+                    Segment previous = lit.previous();
+                    lit.next();
+                    Segment current = lit.next();
+                    if(current.intersects(previous)) {
+                        lit.previous();
+                        lit.previous();
+                        lit.remove();
+                        Logger.warn(
+                                "Segment {} was not loaded because it contains duplicate data. It has been scheduled for garbage collection.",
+                                previous);
+                        // TODO: mark #previous for garbage collection
+                    }
+                }
+                else {
+                    lit.next();
+                }
+            }
+
+            rotate(false);
+            memory = new CacheState();
+
+            /*
+             * If enabled, setup Compaction to run continuously in the
+             * background; trying to perform both "full" and "incremental"
+             * compaction. Incremental compaction is opportunistic; attempting
+             * frequently, but only occurring if no other conflicting work is
+             * happening and only trying to compact one "shift". On the other
+             * hand,full compaction runs less frequently, but is very
+             * aggressive: blocking until any other conflicting work is done
+             * and trying every possible shift.
+             */
+            // @formatter:off
+            compactor = ENABLE_COMPACTION
+                    ? new SimilarityCompactor(storage)
+                    : NoOpCompactor.instance();
+
+            fullCompaction = ENABLE_COMPACTION
+                    ? Executors.newScheduledThreadPool(1,
+                            createCompactionThreadFactory(tag, "Full"))
+                    : NoOpScheduledExecutorService.instance();
+            fullCompaction.scheduleWithFixedDelay(
+                    () -> compactor.executeFullCompaction(),
+                    FULL_COMPACTION_INITIAL_DELAY_IN_SECONDS,
+                    FULL_COMPACTION_RUN_FREQUENCY_IN_SECONDS,
+                    TimeUnit.SECONDS);
+
+            incrementalCompaction = ENABLE_COMPACTION
+                    ? Executors.newScheduledThreadPool(1,
+                            createCompactionThreadFactory(tag, "Incremental"))
+                    : NoOpScheduledExecutorService.instance();
+            incrementalCompaction.scheduleWithFixedDelay(
+                    () -> compactor.tryIncrementalCompaction(),
+                    INCREMENTAL_COMPACTION_INITIAL_DELAY_IN_SECONDS,
+                    INCREMENTAL_COMPACTION_RUN_FREQUENCY_IN_SECONDS,
+                    TimeUnit.SECONDS);
+            // @formatter:on
+            Logger.info("Database is running with compaction {}.",
+                    ENABLE_COMPACTION ? "ON" : "OFF");
         }
+
     }
 
     @Override
     public void stop() {
         if(running) {
             running = false;
+            writer.shutdown();
+            memory = null;
+            Streams.concat(ImmutableList
+                    .of(tableCache, tablePartialCache, indexCache).stream(),
+                    corpusCaches.values().stream()).forEach(cache -> {
+                        cache.invalidateAll();
+                    });
+            for (Segment segment : segments) {
+                try {
+                    segment.close();
+                }
+                catch (IOException e) {
+                    throw CheckedExceptions.wrapAsRuntimeException(e);
+                }
+            }
+            fullCompaction.shutdownNow();
+            incrementalCompaction.shutdownNow();
         }
     }
 
     @Override
     public void sync() {
-        triggerSync();
+        rotate(true);
     }
 
     /**
-     * Create new blocks and sync the current blocks to disk.
+     * Set the {@link Database Database's} tag.
+     * 
+     * @param tag
      */
-    @GuardedBy("triggerSync(boolean)")
-    public void triggerSync() {
-        triggerSync(true);
+    public void tag(String tag) {
+        this.tag = tag;
     }
 
     @Override
-    public boolean verify(String key, TObject value, long record) {
-        Text key0 = Text.wrapCached(key);
-        return getPrimaryRecord(PrimaryKey.wrap(record), key0).verify(key0,
-                Value.wrap(value));
+    public boolean verify(Write write) {
+        Identifier L = write.getRecord();
+        Text K = write.getKey();
+        Value V = write.getValue();
+        Record<Identifier, Text, Value> table = ENABLE_VERIFY_BY_LOOKUP
+                ? getLookupRecord(L, K, V)
+                : getTableRecord(L, K);
+        return table.contains(K, V);
     }
 
     @Override
-    public boolean verify(String key, TObject value, long record, long timestamp) {
-        Text key0 = Text.wrapCached(key);
-        return getPrimaryRecord(PrimaryKey.wrap(record), key0).verify(key0,
-                Value.wrap(value), timestamp);
+    public boolean verify(Write write, long timestamp) {
+        Identifier L = write.getRecord();
+        Text K = write.getKey();
+        Value V = write.getValue();
+        TableRecord table = getTableRecord(L, K);
+        return table.contains(K, V, timestamp);
     }
 
     /**
-     * Return the PrimaryRecord identifier by {@code primaryKey}.
+     * Return a cache for records of type {@code T}.
      * 
-     * @param pkey
-     * @return the PrimaryRecord
+     * @return the cache
      */
-    private PrimaryRecord getPrimaryRecord(PrimaryKey pkey) {
-        masterLock.readLock().lock();
-        try {
-            Composite composite = Composite.create(pkey);
-            PrimaryRecord record = cpc.getIfPresent(composite);
-            if(record == null) {
-                record = Record.createPrimaryRecord(pkey);
-                for (PrimaryBlock block : cpb) {
-                    block.seek(pkey, record);
-                }
-                cpc.put(composite, record);
-            }
-            return record;
-        }
-        finally {
-            masterLock.readLock().unlock();
-        }
+    private <T> Cache<Composite, T> buildCache() {
+        Cache<Composite, T> cache = CacheBuilder.newBuilder()
+                .maximumSize(100000).softValues().build();
+        return new RunningAwareCache<>(cache);
     }
 
     /**
-     * Return the partial PrimaryRecord identifier by {@code key} in
-     * {@code primaryKey}
-     * 
-     * @param pkey
-     * @param key
-     * @return the PrimaryRecord
-     */
-    private PrimaryRecord getPrimaryRecord(PrimaryKey pkey, Text key) {
-        masterLock.readLock().lock();
-        try {
-            Composite composite = Composite.create(pkey, key);
-            PrimaryRecord record = cppc.getIfPresent(composite);
-            if(record == null) {
-                record = Record.createPrimaryRecordPartial(pkey, key);
-                for (PrimaryBlock block : cpb) {
-                    block.seek(pkey, key, record);
-                }
-                cppc.put(composite, record);
-            }
-            return record;
-        }
-        finally {
-            masterLock.readLock().unlock();
-        }
-    }
-
-    /**
-     * Return the SearchRecord identified by {@code key}.
+     * Return the CorpusRecord identified by {@code key}.
      * 
      * @param key
      * @param query
-     * @return the SearchRecord
+     * @param toks {@code query} split by whitespace
+     * @return the CorpusRecord
      */
-    private SearchRecord getSearchRecord(Text key, Text query) {
-        // NOTE: We do not cache SearchRecords because they have the potential
-        // to be VERY large. Holding references to them in a cache would prevent
-        // them from being garbage collected resulting in more OOMs.
+    private CorpusRecord getCorpusRecord(Text key, Text infix) {
         masterLock.readLock().lock();
         try {
-            SearchRecord record = Record.createSearchRecordPartial(key, query);
-            for (SearchBlock block : ctb) {
-                // Seek each word in the query to make sure that multi word
-                // search works.
-                String[] toks = query
-                        .toString()
-                        .toLowerCase()
-                        .split(TStrings.REGEX_GROUP_OF_ONE_OR_MORE_WHITESPACE_CHARS);
-                for (String tok : toks) {
-                    block.seek(key, Text.wrap(tok), record);
+            Composite composite = Composite.create(key, infix);
+            Cache<Composite, CorpusRecord> cache = ENABLE_SEARCH_CACHE
+                    ? corpusCaches.computeIfAbsent(key, $ -> buildCache())
+                    : DISABLED_CORPUS_CACHE;
+            return cache.get(composite, () -> {
+                CorpusRecord $ = CorpusRecord.createPartial(key, infix);
+                for (Segment segment : segments) {
+                    segment.corpus().seek(composite, $);
                 }
-            }
-            return record;
+                return $;
+            });
+        }
+        catch (ExecutionException e) {
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
         finally {
             masterLock.readLock().unlock();
@@ -604,24 +987,150 @@ public final class Database extends BaseStore implements PermanentStore {
     }
 
     /**
-     * Return the SecondaryRecord identified by {@code key}.
+     * Return the IndexRecord identified by {@code key}.
      * 
      * @param key
-     * @return the SecondaryRecord
+     * @return the IndexRecord
      */
-    private SecondaryRecord getSecondaryRecord(Text key) {
+    private IndexRecord getIndexRecord(Text key) {
         masterLock.readLock().lock();
         try {
             Composite composite = Composite.create(key);
-            SecondaryRecord record = csc.getIfPresent(composite);
-            if(record == null) {
-                record = Record.createSecondaryRecord(key);
-                for (SecondaryBlock block : csb) {
-                    block.seek(key, record);
+            return indexCache.get(composite, () -> {
+                IndexRecord $ = IndexRecord.create(key);
+                for (Segment segment : segments) {
+                    segment.index().seek(composite, $);
                 }
-                csc.put(composite, record);
+                return $;
+            });
+        }
+        catch (ExecutionException e) {
+            throw CheckedExceptions.wrapAsRuntimeException(e);
+        }
+        finally {
+            masterLock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Return a {@link Record} that is guaranteed to have the present state for
+     * whether {@code value} is contained for {@code key} in {@code record}. The
+     * truth of this query can be obtained using the
+     * {@link Record#contains(com.cinchapi.concourse.server.io.Byteable, com.cinchapi.concourse.server.io.Byteable)}
+     * method on the returned {@link Record}.
+     * <p>
+     * The query answered by this {@link Record} can also be answered by that
+     * returned from {@link #getTableRecord(Identifier)}
+     * and {@link #getTableRecord(Identifier, Text)}, but this method will
+     * attempt to short circuit by not loading {@link Revisions} that don't
+     * involve {@code record}, {@code key} and {@code value}. As a result, the
+     * returned {@link Record} is not cached and cannot be reliably used for
+     * other queries.
+     * </p>
+     * 
+     * @param record
+     * @param key
+     * @param value
+     * @return the {@link Record}
+     */
+    private Record<Identifier, Text, Value> getLookupRecord(Identifier record,
+            Text key, Value value) {
+        masterLock.readLock().lock();
+        try {
+            // First, see if there is a cached full or partial Record that can
+            // allow a lookup to be performed.
+            Composite c1 = Composite.create(record);
+            Composite c2 = null;
+            Composite c3 = null;
+            Record<Identifier, Text, Value> lookup = tableCache
+                    .getIfPresent(c1);
+            if(lookup == null) {
+                c2 = Composite.create(record, key);
+                lookup = tablePartialCache.getIfPresent(c2);
             }
-            return record;
+            if(lookup == null) {
+                // Create a LookupRecord to handle this, but DO NOT cache it
+                // since it has no other utility.
+                c3 = Composite.create(record, key, value);
+                lookup = new LookupRecord(record, key, value);
+                for (Segment segment : segments) {
+                    if(segment.table().mightContain(c3)) {
+                        // Whenever it is possible that the LKV exists, we must
+                        // gather Revisions for LK within a Record so the
+                        // current state of LKV can be determined.
+                        segment.table().seek(c2, lookup);
+                    }
+                }
+            }
+            return lookup;
+        }
+        finally {
+            masterLock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Return the TableRecord identifier by {@code identifier}.
+     * 
+     * @param identifier
+     * @return the TableRecord
+     */
+    private TableRecord getTableRecord(Identifier identifier) {
+        masterLock.readLock().lock();
+        try {
+            Composite composite = Composite.create(identifier);
+            return tableCache.get(composite, () -> {
+                TableRecord $ = TableRecord.create(identifier);
+                for (Segment segment : segments) {
+                    segment.table().seek(composite, $);
+                }
+                return $;
+            });
+        }
+        catch (ExecutionException e) {
+            throw CheckedExceptions.wrapAsRuntimeException(e);
+        }
+        finally {
+            masterLock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Return the potentially partial TableRecord identified by {@code key} in
+     * {@code identifier}.
+     * <p>
+     * While the returned {@link TableRecord} may not be
+     * {@link TableRecord#isPartial() partial}, the caller should interact
+     * with it as if it is (e.g. do not perform reads for any other keys besides
+     * {@code key}.
+     * </p>
+     * 
+     * @param identifier
+     * @param key
+     * @return the TableRecord
+     */
+    private TableRecord getTableRecord(Identifier identifier, Text key) {
+        masterLock.readLock().lock();
+        try {
+            // Before loading a partial record, see if the full record is
+            // present in memory.
+            TableRecord table = tableCache
+                    .getIfPresent(Composite.create(identifier));
+            if(table == null) {
+                Composite composite = Composite.create(identifier, key);
+                table = tablePartialCache.get(composite, () -> {
+                    TableRecord $ = TableRecord.createPartial(identifier, key);
+                    for (Segment segment : segments) {
+                        segment.table().seek(composite, $);
+                    }
+                    return $;
+                });
+            }
+            return table;
+
+        }
+        catch (ExecutionException e) {
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
         finally {
             masterLock.readLock().unlock();
@@ -632,28 +1141,34 @@ public final class Database extends BaseStore implements PermanentStore {
      * Create new mutable blocks and sync the current blocks to disk if
      * {@code doSync} is {@code true}.
      * 
-     * @param doSync - a flag that controls whether we actually perform a sync
-     *            or not. Sometimes this method is called when there is no data
-     *            to sync and we just want to create new blocks (e.g. on initial
-     *            startup).
+     * @param flush - a flag that controls whether we actually perform a
+     *            sync or not. Sometimes this method is called when there is no
+     *            data to sync and we just want to create new blocks (e.g. on
+     *            initial startup).
      */
-    private void triggerSync(boolean doSync) {
+    /**
+     * Rotate the database by adding a new {@link Segment} and setting it as
+     * {@link #seg0} so that it is the destination into which subsequent
+     * {@link Write Writes} are {@link #accept(Write) accepted}.
+     * 
+     * @param flush - a flag that controls whether the current {@link #seg0} is
+     *            durably flushed to disk prior rotating; if this is
+     *            {@code false} the data unflushed data will exist in memory as
+     *            long as the server is running or until it is later flushed.
+     *            Sometimes this method is called when there is no
+     *            data to sync and the a mutable {@link Segment} needs to be
+     *            created to accept {@link Write Writes} (e.g. on
+     *            {@link #start()}).
+     */
+    private void rotate(boolean flush) {
         masterLock.writeLock().lock();
         try {
-            if(doSync) {
-                // TODO we need a transactional file system to ensure that these
-                // blocks are written atomically (all or nothing)
-                ConcourseExecutors.executeAndAwaitTermination(threadNamePrefix,
-                        new BlockSyncer(cpb0), new BlockSyncer(csb0),
-                        new BlockSyncer(ctb0));
+            if(flush) {
+                String id = seg0.id();
+                Path file = storage.save(seg0);
+                Logger.debug("Completed sync of {} to disk at {}", id, file);
             }
-            String id = Long.toString(Time.now());
-            cpb.add((cpb0 = Block.createPrimaryBlock(id, backingStore
-                    + File.separator + PRIMARY_BLOCK_DIRECTORY)));
-            csb.add((csb0 = Block.createSecondaryBlock(id, backingStore
-                    + File.separator + SECONDARY_BLOCK_DIRECTORY)));
-            ctb.add((ctb0 = Block.createSearchBlock(id, backingStore
-                    + File.separator + SEARCH_BLOCK_DIRECTORY)));
+            segments.add((seg0 = Segment.create()));
         }
         finally {
             masterLock.writeLock().unlock();
@@ -661,175 +1176,305 @@ public final class Database extends BaseStore implements PermanentStore {
     }
 
     /**
-     * A runnable that traverses the appropriate directory for a block type
-     * under {@link #backingStore} and loads the block metadata into memory.
-     * 
+     * A "snapshot" iterator (e.g. changes to the {@link #segments} are not
+     * visible) over {@link Write Writes} that have been accepted by the
+     * {@link Database}.
+     *
+     *
      * @author Jeff Nelson
-     * @param <T> - the Block type
      */
-    private final class BlockLoader<T extends Block<?, ?, ?>> implements
-            Runnable {
+    private final class AcceptedWriteIterator implements Iterator<Write> {
 
-        private final List<T> blocks;
-        private final Class<T> clazz;
-        private final String directory;
+        /**
+         * Current {@link Segment} {@link Segment#writes() write} iterator.
+         */
+        private Iterator<Write> it;
+
+        /**
+         * The next {@link Write} to return from {@link #next()}.
+         */
+        private Write next;
+
+        /**
+         * Iterator over a snapshot of the {@link #segments}.
+         */
+        private final Iterator<Segment> segIt;
 
         /**
          * Construct a new instance.
-         * 
-         * @param clazz
-         * @param directory
-         * @param blocks
          */
-        public BlockLoader(Class<T> clazz, String directory, List<T> blocks) {
-            this.clazz = clazz;
-            this.directory = directory;
-            this.blocks = blocks;
+        private AcceptedWriteIterator() {
+            segIt = new ArrayList<>(segments).iterator();
+            it = null;
+            next = findNext();
         }
 
         @Override
-        public void run() {
-            File _file = null;
-            try {
-                final String path = backingStore + File.separator + directory;
-                FileSystem.mkdirs(path);
-                SortedMap<File, T> blockSorter = Maps
-                        .newTreeMap(NaturalSorter.INSTANCE);
-                Set<String> checksums = Sets.newHashSet();
-                for (File file : new File(path).listFiles(new FilenameFilter() {
-
-                    @Override
-                    public boolean accept(File dir, String name) {
-                        return dir.getAbsolutePath().equals(
-                                new File(path).getAbsolutePath())
-                                && name.endsWith(Block.BLOCK_NAME_EXTENSION);
-                    }
-
-                })) {
-                    _file = file;
-                    String id = Block.getId(file.getName());
-                    Constructor<T> constructor = clazz.getDeclaredConstructor(
-                            String.class, String.class, Boolean.TYPE);
-                    constructor.setAccessible(true);
-                    String checksum = Files.hash(file, Hashing.md5())
-                            .toString();
-                    if(!checksums.contains(checksum)) {
-                        blockSorter.put(file, constructor.newInstance(id,
-                                path.toString(), true));
-                        Logger.info("Loaded {} metadata for {}",
-                                clazz.getSimpleName(), file.getName());
-                        checksums.add(checksum);
-                    }
-                    else {
-                        Logger.warn("{} {} contains duplicate data, so "
-                                + "it was not loaded. You can safely "
-                                + "delete this file.", clazz.getSimpleName(),
-                                id);
-                    }
-
-                }
-                blocks.addAll(blockSorter.values());
-            }
-            catch (ReflectiveOperationException | IOException e) {
-                Logger.error(
-                        "An error occured while loading {} metadata for {}",
-                        clazz.getSimpleName(), _file.getName());
-                Logger.error("", e);
-            }
-
-        }
-
-    }
-
-    /**
-     * A runnable that will sync a block to disk.
-     * 
-     * @author Jeff Nelson
-     */
-    private final class BlockSyncer implements Runnable {
-
-        private final Block<?, ?, ?> block;
-
-        /**
-         * Construct a new instance.
-         * 
-         * @param block
-         */
-        public BlockSyncer(Block<?, ?, ?> block) {
-            this.block = block;
+        public boolean hasNext() {
+            return next != null;
         }
 
         @Override
-        public void run() {
-            block.sync();
-            Logger.debug("Completed sync of {}", block);
-        }
-
-    }
-
-    /**
-     * A runnable that will insert a Writer into a block.
-     * 
-     * @author Jeff Nelson
-     */
-    private final class BlockWriter implements Runnable {
-
-        private final Block<?, ?, ?> block;
-        private final Write write;
-
-        /**
-         * Construct a new instance.
-         * 
-         * @param block
-         * @param write
-         */
-        public BlockWriter(Block<?, ?, ?> block, Write write) {
-            this.block = block;
-            this.write = write;
-        }
-
-        @Override
-        public void run() {
-            Logger.debug("Writing {} to {}", write, block);
-            if(block instanceof PrimaryBlock) {
-                PrimaryRevision revision = (PrimaryRevision) ((PrimaryBlock) block)
-                        .insert(write.getRecord(), write.getKey(),
-                                write.getValue(), write.getVersion(),
-                                write.getType());
-                Record<PrimaryKey, Text, Value> record = cpc
-                        .getIfPresent(Composite.create(write.getRecord()));
-                Record<PrimaryKey, Text, Value> partialRecord = cppc
-                        .getIfPresent(Composite.create(write.getRecord(),
-                                write.getKey()));
-                if(record != null) {
-                    record.append(revision);
-                }
-                if(partialRecord != null) {
-                    partialRecord.append(revision);
-                }
-            }
-            else if(block instanceof SecondaryBlock) {
-                SecondaryRevision revision = (SecondaryRevision) ((SecondaryBlock) block)
-                        .insert(write.getKey(), write.getValue(),
-                                write.getRecord(), write.getVersion(),
-                                write.getType());
-                SecondaryRecord record = csc.getIfPresent(Composite
-                        .create(write.getKey()));
-                if(record != null) {
-                    record.append(revision);
-                }
-            }
-            else if(block instanceof SearchBlock) {
-                ((SearchBlock) block).insert(write.getKey(), write.getValue(),
-                        write.getRecord(), write.getVersion(), write.getType());
-                // NOTE: We do not cache SearchRecords because they have the
-                // potential to be VERY large. Holding references to them in a
-                // cache would prevent them from being garbage collected
-                // resulting in more OOMs.
+        public Write next() {
+            Write current = next;
+            if(current != null) {
+                next = findNext();
+                return current;
             }
             else {
-                throw new IllegalArgumentException();
+                throw new NoSuchElementException();
             }
         }
+
+        /**
+         * Flip to the next {@link Segment} iterator.
+         */
+        private Write findNext() {
+            if(it != null && it.hasNext()) {
+                return it.next();
+            }
+            else if(segIt.hasNext()) { // flip
+                it = segIt.next().writes().iterator();
+                return findNext();
+            }
+            else {
+                return null;
+            }
+        }
+
     }
+
+    /**
+     * View into the {@link Memory} of the {@link Database}.
+     *
+     * @author Jeff Nelson
+     */
+    private class CacheState implements Memory {
+
+        private CacheState() {/* singleton */}
+
+        @Override
+        public boolean contains(long record) {
+            Composite composite = Composite.create(Identifier.of(record));
+            return tableCache.getIfPresent(composite) != null;
+        }
+
+        @Override
+        public boolean contains(String key) {
+            Composite composite = Composite.create(Text.wrapCached(key));
+            return indexCache.getIfPresent(composite) != null;
+        }
+
+        @Override
+        public boolean contains(String key, long record) {
+            Composite composite = Composite.create(Identifier.of(record),
+                    Text.wrapCached(key));
+            return tablePartialCache.getIfPresent(composite) != null
+                    || contains(record);
+        }
+
+    }
+
+    /**
+     * {@link Cache} wrapper that is aware of whether the {@link Database} is
+     * running and behaves accordingly.
+     *
+     * @author Jeff Nelson
+     */
+    private class RunningAwareCache<K, V> implements Cache<K, V> {
+
+        /**
+         * The underlying {@link Cache}.
+         */
+        private final Cache<K, V> cache;
+
+        /**
+         * Construct a new instance.
+         * 
+         * @param cache
+         */
+        RunningAwareCache(Cache<K, V> cache) {
+            this.cache = cache;
+        }
+
+        @Override
+        public ConcurrentMap<K, V> asMap() {
+            return running ? cache.asMap() : Maps.newConcurrentMap();
+        }
+
+        @Override
+        public void cleanUp() {
+            if(running) {
+                cache.cleanUp();
+            }
+        }
+
+        @Override
+        public V get(K key, Callable<? extends V> loader)
+                throws ExecutionException {
+            try {
+                return running ? cache.get(key, loader) : loader.call();
+            }
+            catch (Exception e) {
+                throw new ExecutionException(e.getMessage(), e);
+            }
+        }
+
+        @Override
+        public ImmutableMap<K, V> getAllPresent(Iterable<?> keys) {
+            return running ? cache.getAllPresent(keys) : ImmutableMap.of();
+        }
+
+        @Override
+        public @org.checkerframework.checker.nullness.qual.Nullable V getIfPresent(
+                Object key) {
+            return running ? cache.getIfPresent(key) : null;
+        }
+
+        @Override
+        public void invalidate(Object key) {
+            if(running) {
+                cache.invalidate(key);
+            }
+        }
+
+        @Override
+        public void invalidateAll() {
+            if(running) {
+                cache.invalidateAll();
+            }
+        }
+
+        @Override
+        public void invalidateAll(Iterable<?> keys) {
+            if(running) {
+                cache.invalidateAll(keys);
+            }
+        }
+
+        @Override
+        public void put(K key, V value) {
+            if(running) {
+                cache.put(key, value);
+            }
+        }
+
+        @Override
+        public void putAll(Map<? extends K, ? extends V> m) {
+            if(running) {
+                cache.putAll(m);
+            }
+        }
+
+        @Override
+        public long size() {
+            return running ? cache.size() : 0;
+        }
+
+        @Override
+        public CacheStats stats() {
+            return running ? cache.stats() : new CacheStats(0, 0, 0, 0, 0, 0);
+        }
+
+    }
+
+    /**
+     * The {@link SegmentStorageSystem} for a {@link Database}.
+     *
+     * @author Jeff Nelson
+     */
+    private static class Storage implements SegmentStorageSystem {
+
+        private static String FILESYSTEM_HOOK_FILE_NAME = ".fs";
+
+        /**
+         * The directory where .{@link Segment seg} files are stored.
+         */
+        private final Path directory;
+
+        /**
+         * Used to hook into disk space APIs needed for conformity with
+         * {@link SegmentStorageSystem} interface.
+         */
+        private final transient File fs;
+
+        /**
+         * Controls concurrent access to modify the {@link #segments()}.
+         */
+        private final Lock lock;
+
+        /**
+         * A live collection of the {@link Segments} in the {@link Database}.
+         */
+        private final List<Segment> segments;
+
+        /**
+         * Construct a new instance.
+         * 
+         * @param directory
+         * @param segments
+         */
+        private Storage(Path directory, List<Segment> segments, Lock lock) {
+            this.directory = directory;
+            FileSystem.mkdirs(directory);
+            this.segments = segments;
+            this.lock = lock;
+            this.fs = directory.resolve(FILESYSTEM_HOOK_FILE_NAME).toFile();
+            try {
+                fs.createNewFile(); // File must "exist" in order to
+                                    // hook into disk space APIs
+            }
+            catch (IOException e) {
+                throw CheckedExceptions.wrapAsRuntimeException(e);
+            }
+        }
+
+        @Override
+        public long availableDiskSpace() {
+            return fs.getUsableSpace();
+        }
+
+        /**
+         * Return the full {@link Path} for the directory where the
+         * {@link #segments segment} files are stored.
+         * 
+         * @return the storage directory
+         */
+        public Path directory() {
+            return directory;
+        }
+
+        /**
+         * Return a {@link Stream} of all the storage files.
+         * 
+         * @return the storage files
+         */
+        public Stream<Path> files() {
+            return FileSystem.ls(directory).filter(file -> !file.getFileName()
+                    .toString().equals(FILESYSTEM_HOOK_FILE_NAME));
+        }
+
+        @Override
+        public Lock lock() {
+            return lock;
+        }
+
+        @Override
+        public Path save(Segment segment) {
+            Path file = directory.resolve(UUID.randomUUID() + ".seg");
+            segment.transfer(file);
+            return file;
+        }
+
+        @Override
+        public List<Segment> segments() {
+            return segments;
+        }
+
+        @Override
+        public long totalDiskSpace() {
+            return fs.getTotalSpace();
+        }
+    }
+
 }

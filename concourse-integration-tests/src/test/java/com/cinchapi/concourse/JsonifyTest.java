@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package com.cinchapi.concourse;
 
 import java.util.Arrays;
@@ -9,7 +24,6 @@ import java.util.Set;
 import org.junit.Assert;
 import org.junit.Test;
 
-import com.cinchapi.concourse.Link;
 import com.cinchapi.concourse.test.ConcourseIntegrationTest;
 import com.cinchapi.concourse.util.Convert;
 import com.google.common.collect.LinkedListMultimap;
@@ -75,7 +89,6 @@ public class JsonifyTest extends ConcourseIntegrationTest {
 
     }
 
-    // includePrimaryKey set as true
     @Test
     public void testJsonify() {
         long record1 = 1;
@@ -98,15 +111,21 @@ public class JsonifyTest extends ConcourseIntegrationTest {
         client.add("d", 2, record3);
         client.add("d", 3, record3);
         String json = client.jsonify(recordsList);
-        Set<Long> created = client.insert(json);
-        List<Map<String, Set<Object>>> expected = Lists.newArrayList(client
-                .select(recordsList).values());
-        List<Map<String, Set<Object>>> actual = Lists.newArrayList(client
-                .select(created).values());
-        Assert.assertEquals(expected, actual);
+        Concourse client2 = Concourse.connect(SERVER_HOST, SERVER_PORT, "admin",
+                "admin", Long.toString(System.currentTimeMillis()));
+        try {
+            Set<Long> created = client2.insert(json);
+            List<Map<String, Set<Object>>> expected = Lists
+                    .newArrayList(client.select(recordsList).values());
+            List<Map<String, Set<Object>>> actual = Lists
+                    .newArrayList(client2.select(created).values());
+            Assert.assertEquals(expected, actual);
+        }
+        finally {
+            client2.exit();
+        }
     }
 
-    // PrimaryKey not included
     @Test
     public void testJsonifyNoPrimaryKey() {
         long record1 = 1;
@@ -128,12 +147,19 @@ public class JsonifyTest extends ConcourseIntegrationTest {
         client.add("d", 4, record3);
         client.add("d", 5, record3);
         client.add("d", 6, record3);
-        String json = client.jsonify(recordsList);
+        String json = client.jsonify(recordsList, false);
         Set<Long> created = client.insert(json);
-        List<Map<String, Set<Object>>> expected = Lists.newArrayList(client
-                .select(recordsList).values());
-        List<Map<String, Set<Object>>> actual = Lists.newArrayList(client
-                .select(created).values());
+        List<Map<String, Set<Object>>> expected = Lists
+                .newArrayList(client.select(recordsList).values());
+        List<Map<String, Set<Object>>> actual = Lists
+                .newArrayList(client.select(created).values());
         Assert.assertEquals(expected, actual);
+    }
+
+    @Test
+    public void testJsonifyTimestamp() {
+        client.add("time", Timestamp.now());
+        client.jsonify(client.inventory(), false);
+        Assert.assertTrue(true); // lack of exceptions means we pass
     }
 }

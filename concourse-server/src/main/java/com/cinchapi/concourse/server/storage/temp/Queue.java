@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,19 +15,19 @@
  */
 package com.cinchapi.concourse.server.storage.temp;
 
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
-import java.util.concurrent.Callable;
+import java.util.function.Function;
 
 import javax.annotation.Nullable;
 
 import com.cinchapi.concourse.server.model.Value;
 import com.cinchapi.concourse.server.storage.Action;
-import com.cinchapi.concourse.server.storage.PermanentStore;
+import com.cinchapi.concourse.server.storage.DurableStore;
 import com.cinchapi.concourse.server.storage.cache.BloomFilter;
 import com.cinchapi.concourse.thrift.Type;
-import com.cinchapi.concourse.util.Producer;
-import com.google.common.collect.Lists;
+import com.cinchapi.concourse.util.EagerProducer;
 
 /**
  * A {@link Queue} is a very simple form of {@link Limbo} that represents
@@ -45,35 +45,23 @@ public class Queue extends Limbo {
     private static final int BLOOM_FILTER_CREATION_THRESHOLD = 10;
 
     /**
-     * An empty array of writes that is used to specify type conversion in the
-     * {@link ArrayList#toArray(Object[])} method.
-     */
-    private static final Write[] EMPTY_WRITES_ARRAY = new Write[0];
-
-    /**
      * A global producer that provides BloomFilters to instances that need them.
      * To some extent, this producer will queue up bloom filters so that the
      * overhead of creating them is not incurred directly by the caller.
      */
-    private static final Producer<BloomFilter> producer = new Producer<BloomFilter>(
-            new Callable<BloomFilter>() {
-
-                @Override
-                public BloomFilter call() throws Exception {
-                    // TODO: at some point this size should be determined based
-                    // on some intelligent heuristic
-                    BloomFilter filter = BloomFilter.create(500000);
-                    filter.disableThreadSafety();
-                    return filter;
-                }
-
+    private static final EagerProducer<BloomFilter> BLOOM_FILTER_PRODUCER = EagerProducer
+            .of(() -> {
+                // TODO: at some point this size should be determined based
+                // on some intelligent heuristic
+                BloomFilter filter = BloomFilter.create(500000);
+                return filter;
             });
 
     /**
-     * Revisions are stored as a sequential list of {@link Write} objects, which
-     * means most reads are <em>at least</em> an O(n) scan.
+     * An empty array of writes that is used to specify type conversion in the
+     * {@link ArrayList#toArray(Object[])} method.
      */
-    protected final List<Write> writes;
+    private static final Write[] EMPTY_WRITES_ARRAY = new Write[0];
 
     /**
      * The bloom filter used to speed up verifies.
@@ -88,13 +76,28 @@ public class Queue extends Limbo {
     private long oldestWriteTimestampCache = 0;
 
     /**
+     * Revisions are stored as a sequential list of {@link Write} objects, which
+     * means most reads are <em>at least</em> an O(n) scan.
+     */
+    private final List<Write> writes;
+
+    /**
      * Construct a Limbo with enough capacity for {@code initialSize}. If
      * necessary, the structure will grow to accommodate more data.
      * 
      * @param initialSize
      */
     public Queue(int initialSize) {
-        writes = Lists.newArrayListWithCapacity(initialSize);
+        this(new ArrayList<>(initialSize));
+    }
+
+    /**
+     * Construct a new instance.
+     * 
+     * @param writes
+     */
+    protected Queue(List<Write> writes) {
+        this.writes = writes;
     }
 
     /**
@@ -114,7 +117,7 @@ public class Queue extends Limbo {
                     write.getRecord());
         }
         else if(writes.size() > BLOOM_FILTER_CREATION_THRESHOLD) {
-            filter = producer.consume();
+            filter = BLOOM_FILTER_PRODUCER.consume();
             for (int i = 0; i < writes.size(); ++i) {
                 Write stored = writes.get(i);
                 filter.put(stored.getKey(), stored.getValue(),
@@ -149,7 +152,15 @@ public class Queue extends Limbo {
     }
 
     @Override
-    public void transport(PermanentStore destination, boolean sync) {
+    public void transform(Function<Write, Write> transformer) {
+        for (int i = 0; i < writes.size(); ++i) {
+            Write write = writes.get(i);
+            writes.set(i, transformer.apply(write));
+        }
+    }
+
+    @Override
+    public void transport(DurableStore destination, boolean sync) {
         // For transactions, this method will only be called once, so we can
         // optimize it by not using the services of an Iterator (e.g. hasNext(),
         // remove(), etc) and, if the number of writes in the Queue is large
@@ -165,14 +176,14 @@ public class Queue extends Limbo {
     }
 
     @Override
-    public boolean verify(Write write, long timestamp, boolean exists) {
+    public boolean verify(Write write, long timestamp) {
         if(filter == null
                 || (filter != null && filter.mightContainCached(write.getKey(),
                         write.getValue(), write.getRecord()))) {
-            return super.verify(write, timestamp, exists);
+            return super.verify(write, timestamp);
         }
         else {
-            return exists;
+            return false;
         }
     }
 
@@ -212,7 +223,8 @@ public class Queue extends Limbo {
     }
 
     @Override
-    protected boolean isPossibleSearchMatch(String key, Write write, Value value) {
+    protected boolean isPossibleSearchMatch(String key, Write write,
+            Value value) {
         return write.getKey().toString().equals(key)
                 && value.getType() == Type.STRING;
     }

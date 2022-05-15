@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -21,10 +21,11 @@ import java.util.Comparator;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.Immutable;
 
+import com.cinchapi.common.io.ByteBuffers;
+import com.cinchapi.concourse.server.io.ByteSink;
 import com.cinchapi.concourse.server.io.Byteable;
 import com.cinchapi.concourse.thrift.TObject;
 import com.cinchapi.concourse.thrift.Type;
-import com.cinchapi.concourse.util.ByteBuffers;
 import com.cinchapi.concourse.util.Convert;
 import com.cinchapi.concourse.util.Numbers;
 
@@ -54,19 +55,53 @@ import com.cinchapi.concourse.util.Numbers;
 public final class Value implements Byteable, Comparable<Value> {
 
     /**
+     * A constant representing the smallest possible Value. This should be used
+     * in normal operations, but should only be used to indicate an infinite
+     * range.
+     */
+    public static Value NEGATIVE_INFINITY = Value
+            .wrap(TObject.NEGATIVE_INFINITY);
+
+    /**
+     * A constant representing the largest possible Value. This shouldn't be
+     * used in normal operations, but should only be used to indicate an
+     * infinite range.
+     */
+    public static Value POSITIVE_INFINITY = Value
+            .wrap(TObject.POSITIVE_INFINITY);
+
+    /**
+     * The largest integer/long that can be represented by a Double without
+     * losing precision. This value is derived from the fact that the mantissa
+     * is 53 bytes.
+     */
+    protected static long MAX_DOUBLE_REPRESENTED_INTEGER = (long) Math.pow(2,
+            53);
+
+    /**
+     * The smallest integer/long that can be represented by a Double without
+     * losing precision. This value is derived from the fact that the mantissa
+     * is 53 bytes.
+     */
+    protected static long MIN_DOUBLE_REPRESENTED_INTEGER = -1
+            * MAX_DOUBLE_REPRESENTED_INTEGER;
+
+    /**
+     * The minimum number of bytes needed to encode every Value.
+     */
+    private static final int CONSTANT_SIZE = 1; // type(1)
+
+    /**
      * Return the Value encoded in {@code bytes} so long as those bytes adhere
-     * to the format specified by the {@link #getBytes()} method. This method
-     * assumes that all the bytes in the {@code bytes} belong to the Value. In
-     * general, it is necessary to get the appropriate Value slice from the
-     * parent ByteBuffer using {@link ByteBuffers#slice(ByteBuffer, int, int)}.
+     * to the format specified by the {@link #getBytes()} method.
      * 
      * @param bytes
      * @return the Value
      */
     public static Value fromByteBuffer(ByteBuffer bytes) {
         Type type = Type.values()[bytes.get()];
-        TObject data = extractTObjectAndCache(bytes, type);
-        return new Value(data, bytes);
+        TObject data = createTObject(bytes, type);
+        return new Value(data);
     }
 
     /**
@@ -77,8 +112,8 @@ public final class Value implements Byteable, Comparable<Value> {
      */
     public static Value optimize(Value value) {
         if(value.getType() == Type.TAG) {
-            return Value.wrap(Convert
-                    .javaToThrift(value.getObject().toString()));
+            return Value
+                    .wrap(Convert.javaToThrift(value.getObject().toString()));
         }
         return value;
     }
@@ -127,7 +162,7 @@ public final class Value implements Byteable, Comparable<Value> {
      * @param type
      * @return the TObject
      */
-    private static TObject extractTObjectAndCache(ByteBuffer bytes, Type type) {
+    private static TObject createTObject(ByteBuffer bytes, Type type) {
         // Must allocate a heap buffer because TObject assumes it has a
         // backing array and because of THRIFT-2104 that buffer must wrap a
         // byte array in order to assume that the TObject does not lose data
@@ -148,37 +183,16 @@ public final class Value implements Byteable, Comparable<Value> {
      * @return {@code true} if the type is numeric
      */
     private static boolean isNumericType(Type type) {
-        return type == Type.DOUBLE || type == Type.FLOAT
-                || type == Type.INTEGER || type == Type.LONG;
+        return type == Type.DOUBLE || type == Type.FLOAT || type == Type.INTEGER
+                || type == Type.LONG;
     }
 
     /**
-     * A constant representing the smallest possible Value. This should be used
-     * in normal operations, but should only be used to indicate an infinite
-     * range.
-     */
-    public static Value NEGATIVE_INFINITY = Value.wrap(Convert
-            .javaToThrift(Long.MIN_VALUE));
-
-    /**
-     * A constant representing the largest possible Value. This shouldn't be
-     * used in normal operations, but should only be used to indicate an
-     * infinite range.
-     */
-    public static Value POSITIVE_INFINITY = Value.wrap(Convert
-            .javaToThrift(Long.MAX_VALUE));
-
-    /**
-     * The minimum number of bytes needed to encode every Value.
-     */
-    private static final int CONSTANT_SIZE = 1; // type(1)
-
-    /**
      * A cached copy of the binary representation that is returned from
-     * {@link #getBytes()}.
+     * {@link #getCanonicalBytes()}.
      */
     @Nullable
-    private transient ByteBuffer bytes = null;
+    private ByteBuffer cbytes = null;
 
     /**
      * The underlying data represented by this Value. This representation is
@@ -198,20 +212,10 @@ public final class Value implements Byteable, Comparable<Value> {
      * Construct a new instance.
      * 
      * @param data
-     */
-    private Value(TObject data) {
-        this(data, null);
-    }
-
-    /**
-     * Construct a new instance.
-     * 
-     * @param data
      * @param bytes
      */
-    private Value(TObject data, @Nullable ByteBuffer bytes) {
+    private Value(TObject data) {
         this.data = data;
-        this.bytes = bytes;
     }
 
     @Override
@@ -219,10 +223,63 @@ public final class Value implements Byteable, Comparable<Value> {
         return Sorter.INSTANCE.compare(this, other);
     }
 
+    /**
+     * Compare this and the {@code other} {@link Value} while ignoring any
+     * differences in case.
+     * 
+     * @param other
+     * @return the case insensitive comparison value
+     */
+    public int compareToIgnoreCase(Value other) {
+        return getTObject().compareToIgnoreCase(other.getTObject());
+    }
+
     @Override
-    public void copyTo(ByteBuffer buffer) {
-        buffer.put((byte) data.getType().ordinal());
-        buffer.put(data.bufferForData());
+    public void copyCanonicalBytesTo(ByteBuffer buffer) {
+        copyCanonicalBytesTo(ByteSink.to(buffer));
+    }
+
+    @Override
+    public void copyCanonicalBytesTo(ByteSink sink) {
+        if(cbytes != null) {
+            sink.put(getCanonicalBytes());
+        }
+        else {
+            if(isNumericType()) {
+                // Must canonicalize numbers so that integer and floating point
+                // representations have the same binary form if those
+                // representations are essentially equal (i.e. 18 vs 18.0). We
+                // do this by storing every number as a double unless its an
+                // integer that can't be stored as a double without losing
+                // precision, in which case we store it as a long.
+                Number number = (Number) getObject();
+                if(number instanceof Long && (number
+                        .longValue() < MIN_DOUBLE_REPRESENTED_INTEGER
+                        || number
+                                .longValue() > MAX_DOUBLE_REPRESENTED_INTEGER)) {
+                    sink.putLong(number.longValue());
+                }
+                else {
+                    // Must parse the Double from a string (instead of calling
+                    // number#doubleValue()) because a Float that looks like a
+                    // double is actually represented with less precision and
+                    // will suffer from widening primitive conversion.
+                    sink.putDouble(Double.parseDouble(number.toString()));
+                }
+            }
+            else if(isCharSequenceType()) {
+                sink.putUtf8(getObject().toString());
+            }
+            else {
+                Byteable.super.copyCanonicalBytesTo(sink);
+            }
+        }
+    }
+
+    @Override
+    public void copyTo(ByteSink sink) {
+        sink.put((byte) data.getType().ordinal()); // type
+        sink.put(data.bufferForData()); // data
     }
 
     @Override
@@ -231,8 +288,9 @@ public final class Value implements Byteable, Comparable<Value> {
             final Value other = (Value) obj;
             Type typeA = getType();
             Type typeB = other.getType();
-            if(typeA != typeB && (isNumericType(typeA) && isNumericType(typeB))) {
-                return Numbers.isEqualTo((Number) getObject(),
+            if(typeA != typeB
+                    && (isNumericType(typeA) && isNumericType(typeB))) {
+                return Numbers.areEqual((Number) getObject(),
                         (Number) other.getObject());
             }
             else {
@@ -243,22 +301,44 @@ public final class Value implements Byteable, Comparable<Value> {
     }
 
     /**
-     * Return a byte buffer that represents this Value with the following order:
-     * <ol>
-     * <li><strong>type</strong> - position 0</li>
-     * <li><strong>data</strong> - position 1</li>
-     * </ol>
+     * Compares this {@link Value} to another one while ignoring case
+     * considerations.
      * 
-     * @return the ByteBuffer representation
+     * @param obj
+     * @return a boolean that indicates whether {@code obj} is equal to this
+     *         {@link Value}, regardless of case
      */
-    @Override
-    public ByteBuffer getBytes() {
-        if(bytes == null) {
-            bytes = ByteBuffer.allocate(size());
-            copyTo(bytes);
-            bytes.rewind();
+    public boolean equalsIgnoreCase(Value obj) {
+        if(obj.isCharSequenceType() && isCharSequenceType()) {
+            return ((Value) obj).toLowerCase().equals(toLowerCase());
         }
-        return ByteBuffers.asReadOnlyBuffer(bytes);
+        else {
+            return equals(obj);
+        }
+    }
+
+    @Override
+    public ByteBuffer getCanonicalBytes() {
+        if(cbytes == null) {
+            ByteBuffer cbytes = ByteBuffer.allocate(getCanonicalLength());
+            copyCanonicalBytesTo(ByteSink.to(cbytes));
+            cbytes.flip();
+            this.cbytes = cbytes;
+        }
+        return ByteBuffers.asReadOnlyBuffer(cbytes);
+    }
+
+    @Override
+    public int getCanonicalLength() {
+        if(isNumericType()) {
+            return 8;
+        }
+        else if(isCharSequenceType()) {
+            return size() - CONSTANT_SIZE;
+        }
+        else {
+            return Byteable.super.getCanonicalLength();
+        }
     }
 
     /**
@@ -298,6 +378,16 @@ public final class Value implements Byteable, Comparable<Value> {
     }
 
     /**
+     * Return {@code true} if the value {@link #getType() type} is a character
+     * sequence.
+     * 
+     * @return {@code true} if the value type is a character sequence
+     */
+    public boolean isCharSequenceType() {
+        return getTObject().isCharSequenceType();
+    }
+
+    /**
      * Return {@code true} if the value {@link #getType() type} is numeric.
      * 
      * @return {@code true} if the value type is numeric
@@ -317,6 +407,44 @@ public final class Value implements Byteable, Comparable<Value> {
     }
 
     /**
+     * Convert this {@link Value} to its uppercase form.
+     * <p>
+     * If this {@link Value} isn't a {@link #isCharSequenceType() character
+     * sequence} or can't be uppercased, this {@link Value} is returned.
+     * </p>
+     * 
+     * @return the uppercased {@link Value}
+     */
+    public Value toUpperCase() {
+        if(isCharSequenceType()) {
+            return wrap(
+                    Convert.javaToThrift(getObject().toString().toUpperCase()));
+        }
+        else {
+            return this;
+        }
+    }
+
+    /**
+     * Convert this {@link Value} to its lowercase form.
+     * <p>
+     * If this {@link Value} isn't a {@link #isCharSequenceType() character
+     * sequence} or can't be lowercased, this {@link Value} is returned.
+     * </p>
+     * 
+     * @return the lowercased {@link Value}
+     */
+    public Value toLowerCase() {
+        if(isCharSequenceType()) {
+            return wrap(
+                    Convert.javaToThrift(getObject().toString().toLowerCase()));
+        }
+        else {
+            return this;
+        }
+    }
+
+    /**
      * A {@link Comparator} that is used to sort Values using weak typing.
      * 
      * @author Jeff Nelson
@@ -326,39 +454,8 @@ public final class Value implements Byteable, Comparable<Value> {
 
         @Override
         public int compare(Value v1, Value v2) {
-            if((v1 == POSITIVE_INFINITY && v2 == POSITIVE_INFINITY)
-                    || (v1 == NEGATIVE_INFINITY && v2 == NEGATIVE_INFINITY)) {
-                return 0;
-            }
-            else if(v1 == POSITIVE_INFINITY) {
-                return 1;
-            }
-            else if(v2 == POSITIVE_INFINITY) {
-                return -1;
-            }
-            else if(v1 == NEGATIVE_INFINITY) {
-                return -1;
-            }
-            else if(v2 == NEGATIVE_INFINITY) {
-                return 1;
-            }
-            else {
-                Object o1 = v1.getObject();
-                Object o2 = v2.getObject();
-                if(o1 instanceof Number && o2 instanceof Number) {
-                    return Numbers.compare((Number) o1, (Number) o2);
-                }
-                else if(o1 instanceof Number) {
-                    return -1;
-                }
-                else if(o2 instanceof Number) {
-                    return 1;
-                }
-                else {
-                    return o1.toString().compareToIgnoreCase(o2.toString());
-                }
-            }
-
+            return TObject.comparator().compare(v1.getTObject(),
+                    v2.getTObject());
         }
     }
 

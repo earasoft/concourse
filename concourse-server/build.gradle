@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
+ * Copyright (c) 2013-2022 Cinchapi Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ dependencies {
     compile project(':concourse-shell')
     compile project(':concourse-cli')
     compile project(':concourse-import')
-    compile 'com.google.guava:guava:15.0'
+    compile project(':concourse-export')
     compile 'com.beust:jcommander:1.32'
     compile 'com.github.stephenc.high-scale-lib:high-scale-lib:1.1.4'
     compile ('org.reflections:reflections:0.9.9-RC2'){
@@ -30,8 +30,18 @@ dependencies {
     compile 'org.eclipse.jetty:jetty-server:9.2.9.v20150224'
     compile 'org.eclipse.jetty:jetty-webapp:9.2.9.v20150224'
     compile 'com.github.spullara.mustache.java:compiler:0.8.15'
-    compile 'com.joestelmach:natty:0.11'
-    compile 'com.google.inject:guice:4.0'
+    compile 'com.joestelmach:natty:0.12'
+    compile 'com.google.inject:guice:4.2.0'
+    compile 'io.atomix.catalyst:catalyst-buffer:1.1.1'
+    compile 'com.cinchapi:process-watcher:1.0.0'
+    compile (group:'com.cinchapi', name: 'bucket', version: bucketVersion, changing:true) {
+      exclude group: 'com.cinchapi'
+    }
+    compile 'org.zeroturnaround:zt-zip:1.13'
+    compile 'net.openhft:chronicle-map:3.21ea83'
+    compile 'com.zaxxer:SparseBitSet:1.2'
+    compile 'com.github.davidmoten:bplustree:0.1.3'
+    compile group:'com.cinchapi', name: 'off-heap-memory', version: '1.1.0-SNAPSHOT', changing:true
 
     testCompile 'com.carrotsearch:junit-benchmarks:0.7.2'
     testCompile 'io.takari.junit:takari-cpsuite:1.2.7'
@@ -87,5 +97,28 @@ task installer(type: Exec, dependsOn: distZip) {
     }
     else{
       commandLine 'bash', '.installer.sh', version
+    }
+}
+
+task dockerize(type: Exec, dependsOn: installer) {
+    commandLine 'bash', 'dockerize.sh', mavenVersion
+}
+
+task cloudsmithUpload(dependsOn: installer) {
+  doLast {
+    fileTree("${project.projectDir}/build/distributions").matching {
+      include "**/*.bin"
+    }.each { file ->
+      exec {
+        commandLine 'bash', '../cloudsmith-upload', '-f', file, '-v', mavenVersion, '-r', mavenVersion.matches('^[0-9]+\\.[0-9]+\\.[0-9]+(-rc[0-9]+){0,1}$') ? 'open-source' : 'open-source-snapshots'
+      }
+    }
+  }
+}
+
+idea {
+    copy {
+        from "launch" + File.separator + "idea"
+        into ".." + File.separator+ ".idea" + File.separator + "runConfigurations"
     }
 }

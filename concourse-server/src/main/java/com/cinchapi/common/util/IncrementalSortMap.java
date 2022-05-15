@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -25,11 +25,10 @@ import java.util.Set;
 import java.util.SortedMap;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.locks.StampedLock;
 
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
-
-import jsr166e.StampedLock;
 
 import com.google.common.base.MoreObjects;
 import com.google.common.collect.Lists;
@@ -643,8 +642,8 @@ public class IncrementalSortMap<K, V> implements ConcurrentNavigableMap<K, V> {
     }
 
     @Override
-    public ConcurrentNavigableMap<K, V> subMap(K fromKey,
-            boolean fromInclusive, K toKey, boolean toInclusive) {
+    public ConcurrentNavigableMap<K, V> subMap(K fromKey, boolean fromInclusive,
+            K toKey, boolean toInclusive) {
         long[] stamps = grabAllSegmentWriteLocks();
         try {
             sort();
@@ -740,8 +739,8 @@ public class IncrementalSortMap<K, V> implements ConcurrentNavigableMap<K, V> {
     private long[] grabAllSegmentLocks(boolean read) {
         long[] stamps = new long[segmentLocks.length];
         for (int i = 0; i < stamps.length; i++) {
-            stamps[i] = read ? segmentLocks[i].readLock() : segmentLocks[i]
-                    .writeLock();
+            stamps[i] = read ? segmentLocks[i].readLock()
+                    : segmentLocks[i].writeLock();
         }
         return stamps;
     }

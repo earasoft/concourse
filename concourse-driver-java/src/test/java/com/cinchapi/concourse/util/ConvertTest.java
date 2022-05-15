@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -22,20 +22,27 @@ import java.text.MessageFormat;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Set;
 
 import org.apache.commons.lang.StringUtils;
 import org.junit.Assert;
 import org.junit.Test;
 
+import com.cinchapi.ccl.syntax.ConditionTree;
+import com.cinchapi.ccl.type.function.IndexFunction;
+import com.cinchapi.ccl.type.function.KeyConditionFunction;
+import com.cinchapi.ccl.type.function.KeyRecordsFunction;
+import com.cinchapi.common.base.AnyStrings;
 import com.cinchapi.concourse.Link;
 import com.cinchapi.concourse.Tag;
+import com.cinchapi.concourse.Timestamp;
+import com.cinchapi.concourse.lang.ConcourseCompiler;
 import com.cinchapi.concourse.thrift.Operator;
-import com.cinchapi.concourse.util.Convert;
-import com.cinchapi.concourse.util.Random;
-import com.cinchapi.concourse.util.Strings;
+import com.cinchapi.concourse.thrift.TObject;
 import com.cinchapi.concourse.util.Convert.ResolvableLink;
 import com.google.common.collect.HashMultimap;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.LinkedHashMultimap;
 import com.google.common.collect.Lists;
@@ -45,8 +52,8 @@ import com.google.common.collect.Sets;
 import com.google.gson.JsonParseException;
 
 /**
- * Unit tests for the {@link Convert} utility class
- * 
+ * Unit tests for the {@link com.cinchapi.concourse.util.Convert} utility class
+ *
  * @author Jeff Nelson
  */
 public class ConvertTest {
@@ -74,24 +81,24 @@ public class ConvertTest {
     @Test
     public void testCannotConvertLinkFromBooleanValue() {
         Boolean number = Random.getBoolean();
-        String value = MessageFormat
-                .format("{0}{1}{0}", "@", number.toString());
+        String value = MessageFormat.format("{0}{1}{0}", "@",
+                number.toString());
         Assert.assertFalse(Convert.stringToJava(value) instanceof Link);
     }
 
     @Test
     public void testCannotConvertLinkFromDoubleValue() {
         Number number = Random.getDouble();
-        String value = MessageFormat
-                .format("{0}{1}{0}", "@", number.toString());
+        String value = MessageFormat.format("{0}{1}{0}", "@",
+                number.toString());
         Assert.assertFalse(Convert.stringToJava(value) instanceof Link);
     }
 
     @Test
     public void testCannotConvertLinkFromFloatValue() {
         Number number = Random.getFloat();
-        String value = MessageFormat
-                .format("{0}{1}{0}", "@", number.toString());
+        String value = MessageFormat.format("{0}{1}{0}", "@",
+                number.toString());
         Assert.assertFalse(Convert.stringToJava(value) instanceof Link);
     }
 
@@ -101,8 +108,8 @@ public class ConvertTest {
         while (StringUtils.isNumeric(number)) {
             number = Random.getString();
         }
-        String value = MessageFormat
-                .format("{0}{1}{0}", "@", number.toString());
+        String value = MessageFormat.format("{0}{1}{0}", "@",
+                number.toString());
         Assert.assertFalse(Convert.stringToJava(value) instanceof Link);
     }
 
@@ -142,8 +149,8 @@ public class ConvertTest {
         // A value that is wrapped in single (') or double (") quotes must
         // always be converted to a string
         Object object = Random.getObject();
-        String value = MessageFormat
-                .format("{0}{1}{0}", "'", object.toString());
+        String value = MessageFormat.format("{0}{1}{0}", "'",
+                object.toString());
         Assert.assertEquals(Convert.stringToJava(value), object.toString());
     }
 
@@ -333,9 +340,9 @@ public class ConvertTest {
     public void testConvertResolvableLink() {
         String key = Random.getString().replace(" ", "");
         String value = Random.getObject().toString().replace(" ", "");
-        String ccl = Strings.joinWithSpace(key, "=", value);
-        ResolvableLink link = (ResolvableLink) Convert.stringToJava(Convert
-                .stringToResolvableLinkInstruction(ccl));
+        String ccl = AnyStrings.joinWithSpace(key, "=", value);
+        ResolvableLink link = (ResolvableLink) Convert
+                .stringToJava(Convert.stringToResolvableLinkInstruction(ccl));
         Assert.assertEquals(ccl, link.getCcl());
     }
 
@@ -343,9 +350,9 @@ public class ConvertTest {
     public void testConvertResolvableLinkWithNumbers() {
         String key = Random.getNumber().toString();
         String value = Random.getNumber().toString();
-        String ccl = Strings.joinWithSpace(key, "=", value);
-        ResolvableLink link = (ResolvableLink) Convert.stringToJava(Convert
-                .stringToResolvableLinkInstruction(ccl));
+        String ccl = AnyStrings.joinWithSpace(key, "=", value);
+        ResolvableLink link = (ResolvableLink) Convert
+                .stringToJava(Convert.stringToResolvableLinkInstruction(ccl));
         Assert.assertEquals(ccl, link.getCcl());
     }
 
@@ -368,7 +375,8 @@ public class ConvertTest {
         Assert.assertTrue(string.matches(MessageFormat.format("{0}{1}{0}",
                 MessageFormat.format("{0}{1}{2}",
                         RAW_RESOLVABLE_LINK_SYMBOL_PREPEND, ".+",
-                        RAW_RESOLVABLE_LINK_SYMBOL_APPEND), ".+")));
+                        RAW_RESOLVABLE_LINK_SYMBOL_APPEND),
+                ".+")));
     }
 
     @Test
@@ -386,8 +394,8 @@ public class ConvertTest {
     public void testTransformValueToResolvableLink() {
         String key = Random.getString();
         String value = Random.getObject().toString();
-        String expected = Strings.joinSimple("@",
-                Strings.joinWithSpace(key, "=", value), "@");
+        String expected = AnyStrings.joinSimple("@",
+                AnyStrings.joinWithSpace(key, "=", value), "@");
         Assert.assertEquals(expected,
                 Convert.stringToResolvableLinkSpecification(key, value));
     }
@@ -501,19 +509,22 @@ public class ConvertTest {
     @Test
     public void testStringToOperatorLinksTo() {
         String symbol = "->";
-        Assert.assertEquals(Convert.stringToOperator(symbol), Operator.LINKS_TO);
+        Assert.assertEquals(Convert.stringToOperator(symbol),
+                Operator.LINKS_TO);
     }
 
     @Test
     public void testSymbolToOperatorLinksTo() {
         String symbol = "lnk2";
-        Assert.assertEquals(Convert.stringToOperator(symbol), Operator.LINKS_TO);
+        Assert.assertEquals(Convert.stringToOperator(symbol),
+                Operator.LINKS_TO);
     }
 
     @Test
     public void testStringLnks2ToOperatorLinksTo() {
         String symbol = "lnks2";
-        Assert.assertEquals(Convert.stringToOperator(symbol), Operator.LINKS_TO);
+        Assert.assertEquals(Convert.stringToOperator(symbol),
+                Operator.LINKS_TO);
     }
 
     @Test
@@ -544,8 +555,8 @@ public class ConvertTest {
         map.put("a", aValues);
         map.put("b", bValues);
         map.put("c", cValues);
-        String expected = "{\"b\":true,\"c\":[\"hello\",\"hello world\"],\"a\":[1,\"1\",\"1.0D\"]}";
-        Assert.assertEquals(expected, Convert.mapToJson(map));
+        String converted = Convert.mapToJson(map);
+        Assert.assertEquals(map, Convert.jsonToJava(converted).asMap());
     }
 
     @Test
@@ -566,7 +577,8 @@ public class ConvertTest {
         map.put("b", bValues);
         map.put("c", cValues);
         String expected = "{\"b\":true,\"c\":[],\"a\":[1,\"1\",\"1.0D\"]}";
-        Assert.assertEquals(expected, Convert.mapToJson(map));
+        Assert.assertTrue(expected.contains("\"c\":[]"));
+
     }
 
     @Test
@@ -655,6 +667,187 @@ public class ConvertTest {
         String json = "[{\"id\":34,\"handle\":\".tp-caption.medium_bg_orange\",\"settings\":\"{\\\"hover\\\":\\\"false\\\"}\",\"hover\":\"\",\"params\":'{\"color\":\"rgb(255, 255, 255)\",\"font-size\":\"20px\",\"line-height\":\"20px\",\"font-weight\":\"800\",\"font-family\":\"\\\"Open Sans\\\"\",\"text-decoration\":\"none\",\"padding\":\"10px\",\"background-color\":\"rgb(243, 156, 18)\",\"border-width\":\"0px\",\"border-color\":\"rgb(255, 214, 88)\",\"border-style\":\"none\"}',\"__table\":\"wp_revslider_css\"}]";
         Convert.anyJsonToJava(json);
         Assert.assertTrue(true); // lack of Exception means the test passes
+    }
+
+    @Test
+    public void testPossibleThriftToJavaAlreadyJava() {
+        Object expected = Random.getObject();
+        Object actual = Convert.possibleThriftToJava(expected);
+        Assert.assertEquals(expected, actual);
+    }
+
+    @Test
+    public void testPossibleThriftToJavaScalarTObject() {
+        Object expected = Random.getObject();
+        TObject texpected = Convert.javaToThrift(expected);
+        Object actual = Convert.possibleThriftToJava(texpected);
+        Assert.assertEquals(expected, actual);
+    }
+
+    @Test
+    public void testPossibleThriftToJavaListMixed() {
+        List<Object> expected = Lists.newArrayList();
+        int count = Random.getScaleCount();
+        for (int i = 0; i < count; ++i) {
+            expected.add(Random.getObject());
+        }
+        List<Object> texpected = Lists.newArrayList();
+        for (Object object : expected) {
+            if(Random.getInt() % 2 == 0) {
+                texpected.add(Convert.javaToThrift(object));
+            }
+            else {
+                texpected.add(object);
+            }
+        }
+        List<Object> actual = Convert.possibleThriftToJava(texpected);
+        Assert.assertEquals(expected, actual);
+    }
+
+    @Test
+    public void testPossibleThriftToJavaSetMixed() {
+        Set<Object> expected = Sets.newHashSet();
+        int count = Random.getScaleCount();
+        for (int i = 0; i < count; ++i) {
+            expected.add(Random.getObject());
+        }
+        Set<Object> texpected = Sets.newHashSet();
+        for (Object object : expected) {
+            if(Random.getInt() % 2 == 0) {
+                texpected.add(Convert.javaToThrift(object));
+            }
+            else {
+                texpected.add(object);
+            }
+        }
+        Set<Object> actual = Convert.possibleThriftToJava(texpected);
+        Assert.assertEquals(expected, actual);
+    }
+
+    @Test
+    public void testPossibleThriftToJavaMapMixed() {
+        Map<Object, Object> expected = Maps.newHashMap();
+        int count = Random.getScaleCount();
+        for (int i = 0; i < count; ++i) {
+            Object key = Random.getObject();
+            Object value = Random.getObject();
+            expected.put(key, value);
+        }
+        Map<Object, Object> texpected = Maps.newHashMap();
+        for (Entry<Object, Object> object : expected.entrySet()) {
+            Object key = object.getKey();
+            Object value = object.getValue();
+            int seed = Random.getInt();
+            if(seed % 5 == 0) {
+                key = Convert.javaToThrift(key);
+            }
+            else if(seed % 4 == 0) {
+                value = Convert.javaToThrift(value);
+            }
+            else if(seed % 3 == 0) {
+                key = Convert.javaToThrift(key);
+                value = Convert.javaToThrift(value);
+            }
+            texpected.put(key, value);
+        }
+        Map<Object, Object> actual = Convert.possibleThriftToJava(texpected);
+        Assert.assertEquals(expected, actual);
+    }
+
+    @Test
+    public void testConvertStringToOperatorCaseInsensitive() {
+        Assert.assertEquals(Operator.LIKE, Convert.stringToOperator("LIKE"));
+    }
+
+    @Test
+    public void testConvertStringToTimestamp() {
+        String string = "|December 30, 1987|";
+        Assert.assertTrue(Convert.stringToJava(string) instanceof Timestamp);
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void testConvertStringToTimestampInvalidFormat() {
+        String string = "|December 30, 1987|fsfsaf|";
+        Assert.assertTrue(Convert.stringToJava(string) instanceof Timestamp);
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void testConvertStringToTimestampNotMatchingFormat() {
+        String string = "|December 30, 1987|MM/dd/yyyy|";
+        Assert.assertTrue(Convert.stringToJava(string) instanceof Timestamp);
+    }
+
+    @Test(expected = IllegalStateException.class)
+    public void testConvertTObjectWithNullType() {
+        TObject tobject = Convert.javaToThrift(Timestamp.now());
+        tobject.type = null;
+        Convert.thriftToJava(tobject);
+    }
+
+    @Test
+    public void testConvertStringDoubleInScientificNotation() {
+        List<String> values = ImmutableList.of("5.15501576938E-4",
+                "5.15501576938E+4", "1e10");
+        values.forEach(value -> {
+            double expected = Double.parseDouble(value);
+            Object actual = Convert.stringToJava(value);
+            if(actual instanceof Float) {
+                actual = ((Float) actual).doubleValue();
+            }
+            Assert.assertEquals(expected, actual);
+        });
+    }
+
+    @Test
+    public void testConvertBigNumberStringStaysAsString() {
+        String expected = "20191009162729766293175";
+        Object actual = Convert.stringToJava(expected);
+        Assert.assertEquals(expected, actual);
+    }
+
+    @Test
+    public void testConvertStringToIndexFunction() {
+        IndexFunction expected = new IndexFunction("average", "age");
+        Object actual = Convert.stringToJava("average(age)");
+        Assert.assertEquals(expected, actual);
+    }
+
+    @Test
+    public void testDontConvertQuotedIndexFunction() {
+        String expected = "average(age)";
+        Object actual = Convert.stringToJava("'average(age)'");
+        Assert.assertEquals(expected, actual);
+    }
+
+    @Test
+    public void testConvertIndexFunctionToThriftRoundTrip() {
+        IndexFunction expected = new IndexFunction("average", "age");
+        IndexFunction actual = (IndexFunction) Convert
+                .thriftToJava(Convert.javaToThrift(expected));
+        Assert.assertEquals(expected, actual);
+    }
+
+    @Test
+    public void testConvertKeyConditionFunctionToThriftRoundTrip() {
+        KeyConditionFunction expected = new KeyConditionFunction("average",
+                "age", (ConditionTree) ConcourseCompiler.get().parse(
+                        "name = jeff or (age > 30 and (email like '%gmail.com%' or employed = true) or foo = bar)"));
+        KeyConditionFunction actual = (KeyConditionFunction) Convert
+                .thriftToJava(Convert.javaToThrift(expected));
+        Assert.assertEquals(expected, actual);
+    }
+
+    @Test
+    public void testConvertKeyRecordsFunctionToThriftRoundTrip() {
+        List<String> records = Lists.newArrayList();
+        for (int i = 0; i < Random.getScaleCount(); ++i) {
+            records.add(Integer.toString(i));
+        }
+        KeyRecordsFunction expected = new KeyRecordsFunction("average", "age",
+                records);
+        KeyRecordsFunction actual = (KeyRecordsFunction) Convert
+                .thriftToJava(Convert.javaToThrift(expected));
+        Assert.assertEquals(expected, actual);
     }
 
     /**

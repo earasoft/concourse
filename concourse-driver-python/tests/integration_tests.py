@@ -1,4 +1,4 @@
-# Copyright (c) 2013-2016 Cinchapi Inc.
+# Copyright (c) 2013-2022 Cinchapi Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import signal
 from . import test_data
 from concourse import Concourse, Tag, Link, Diff, Operator, constants
 from concourse.thriftapi.shared.ttypes import Type
+from concourse.thriftapi.complex.ttypes import ComplexTObject
 from concourse.utils import python_to_thrift
 import ujson
 from tests import ignore
@@ -2317,3 +2318,81 @@ class TestPythonClientDriver(IntegrationBaseTest):
             'foo': Link.to_where('foo = 1')
         })[0]
         assert_equal(Link.to(record1), self.client.get(key='foo', record=record2))
+
+    def test_reconcile_empty_values(self):
+        self.client.reconcile(key="foo", record=17, values=[])
+        assert_equal(0, len(self.client.select(key="foo", record=17)))
+
+    def test_reconcile(self):
+        record = 1
+        key = "testKey"
+        self.client.add(key, "A", record)
+        self.client.add(key, "C", record)
+        self.client.add(key, "D", record)
+        self.client.add(key, "E", record)
+        self.client.add(key, "F", record)
+        values = ['A', 'B', 'D', 'G']
+        self.client.reconcile(key=key, record=record, values=values)
+        stored = self.client.select(key=key, record=record)
+        assert_equal(set(values), set(stored))
+
+    def test_complex_tobject_serialize_string(self):
+        expected = test_data.random_string()
+        actual = ComplexTObject.from_python_object(expected).get_python_object()
+        assert_equal(expected, actual)
+
+    def test_complex_tobject_serialize_int(self):
+        expected = test_data.random_int()
+        actual = ComplexTObject.from_python_object(expected).get_python_object()
+        assert_equal(expected, actual)
+
+    def test_complex_tobject_serialize_bool(self):
+        expected = test_data.random_bool()
+        actual = ComplexTObject.from_python_object(expected).get_python_object()
+        assert_equal(expected, actual)
+
+    def test_complex_tobject_serialize_long(self):
+        expected = test_data.random_long()
+        actual = ComplexTObject.from_python_object(expected).get_python_object()
+        assert_equal(expected, actual)
+
+    def test_complex_tobject_serialize_float(self):
+        expected = test_data.random_float()
+        actual = ComplexTObject.from_python_object(expected).get_python_object()
+        assert_equal(expected, actual)
+
+    def test_complex_tobject_serialize_list_basic(self):
+        expected = [1, 2, 3, 4, 5, 6, 7, 8, "9"]
+        actual = ComplexTObject.from_python_object(expected).get_python_object()
+        assert_equal(expected, actual)
+
+    def test_complex_tobject_serialize_list(self):
+        count = test_data.scale_count()
+        expected = []
+        for n in range(0, count):
+            expected.append(test_data.random_object())
+        actual = ComplexTObject.from_python_object(expected).get_python_object()
+        assert_equal(expected, actual)
+
+    def test_complex_tobject_serialize_set(self):
+        count = test_data.scale_count()
+        expected = set()
+        for n in range(0, count):
+            expected.add(test_data.random_object())
+        actual = ComplexTObject.from_python_object(expected).get_python_object()
+        assert_equal(expected, actual)
+
+    def test_complex_tobject_serialize_list_of_lists(self):
+        expected = ["1", True, 1, [1, 2, 3, "4"], [1, 2], set(["1", True])]
+        actual = ComplexTObject.from_python_object(expected).get_python_object()
+        assert_equal(expected, actual)
+
+    def test_complex_tobject_serialize_dict(self):
+        expected = {}
+        count = test_data.scale_count()
+        for n in range(0, count):
+            key = test_data.random_object()
+            value = test_data.random_object()
+            expected[key] = value
+        actual = ComplexTObject.from_python_object(expected).get_python_object()
+        assert_equal(expected, actual)

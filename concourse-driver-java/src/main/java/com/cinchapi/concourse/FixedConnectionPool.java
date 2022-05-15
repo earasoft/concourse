@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
+ * Copyright (c) 2013-2022 Cinchapi Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,7 +18,8 @@ package com.cinchapi.concourse;
 import java.util.Queue;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
-import com.google.common.base.Throwables;
+
+import com.cinchapi.common.base.CheckedExceptions;
 
 /**
  * A {@link ConnectionPool} with a fixed number of connections. If all the
@@ -40,7 +41,7 @@ class FixedConnectionPool extends ConnectionPool {
      */
     protected FixedConnectionPool(String host, int port, String username,
             String password, int poolSize) {
-        super(host, port, username, password, poolSize);
+        this(host, port, username, password, "", poolSize);
     }
 
     /**
@@ -55,7 +56,8 @@ class FixedConnectionPool extends ConnectionPool {
      */
     protected FixedConnectionPool(String host, int port, String username,
             String password, String environment, int poolSize) {
-        super(host, port, username, password, environment, poolSize);
+        super(() -> Concourse.connect(host, port, username, password,
+                environment), poolSize);
     }
 
     @Override
@@ -69,7 +71,7 @@ class FixedConnectionPool extends ConnectionPool {
             return ((BlockingQueue<Concourse>) available).take();
         }
         catch (InterruptedException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
+ * Copyright (c) 2013-2022 Cinchapi Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,16 +14,6 @@
  * limitations under the License.
  */
 
-// To upgrade:
-// 1. Take a backup of gradlew because there is custom logic there that must
-//    be preserved
-// 2. Change gradleVersion here
-// 3. Change the distributionUrl in gradle/wrapper/gradle-wrapper.properties
-// 4. Run ./gradlew wrapper
-task wrapper(type: Wrapper) {
-    gradleVersion = '2.8'
-}
-
 // The project version is controlled externally by the "version.sh" script.
 def getVersion = { ->
     def stdout = new ByteArrayOutputStream()
@@ -34,15 +24,32 @@ def getVersion = { ->
     return stdout.toString().trim()
 }
 
-ext.globalVersion  = getVersion()
+def validateVersion = { version ->
+    def matcher = version =~/^(\d+\.)?(\d+\.)?(\d+\.)?(\d+)(-SNAPSHOT){0,1}$/
+    return matcher.matches() || System.getenv('FORCE_PUBLISH')
+}
+
+ext.globalVersion = getVersion()
 ext.isWindows = System.getProperty("os.name").toLowerCase().contains("windows")
 
 buildscript {
     repositories {
         mavenCentral()
+        maven {
+            url "https://plugins.gradle.org/m2/"
+        }
     }
     dependencies {
         classpath 'net.nisgits.gradle:gradle-executable-jar-plugin:1.7.0'
+        classpath "com.diffplug.spotless:spotless-plugin-gradle:5.1.2"
+    }
+}
+
+if (JavaVersion.current().isJava8Compatible()) {
+    allprojects {
+        tasks.withType(Javadoc) {
+            options.addStringOption('Xdoclint:none', '-quiet')
+        }
     }
 }
 
@@ -50,13 +57,43 @@ subprojects {
     apply plugin: 'java'
     apply plugin: 'eclipse'
     apply plugin: 'maven'
+    apply plugin: 'idea'
+    apply plugin: 'com.diffplug.spotless'
+    apply plugin: 'maven-publish'
 
     repositories {
         mavenCentral()
         mavenLocal()
         maven {
-          url 'https://oss.sonatype.org/content/repositories/snapshots/'
+            url 'https://oss.sonatype.org/content/repositories/snapshots/'
         }
+        maven {
+            url "https://packages.cinchapi.com/public/open-source/maven/"
+        }
+        maven {
+            url "https://packages.cinchapi.com/public/open-source-snapshots/maven/"
+        }
+        maven {
+            url "https://packages.cinchapi.com/public/platform/maven/"
+        }
+        maven {
+            url "https://packages.cinchapi.com/public/platform-snapshots/maven/"
+        }
+        maven {
+            url "https://packages.cinchapi.com/public/enterprise/maven/"
+            credentials {
+                username = System.getenv('CLOUDSMITH_API_USER')
+                password = System.getenv('CLOUDSMITH_API_KEY')
+            }
+        }
+        maven {
+            url "https://packages.cinchapi.com/public/enterprise-snapshots/maven/"
+            credentials {
+                username = System.getenv('CLOUDSMITH_API_USER')
+                password = System.getenv('CLOUDSMITH_API_KEY')
+            }
+        }
+        jcenter()
     }
 
     configurations {
@@ -64,23 +101,50 @@ subprojects {
         all*.exclude group: 'com.google.code.findbugs', module: 'annotations'
     }
 
+    // Ensure that these transitive dependencies are excluded so we don't get version clashes
+    def exclusions = [[group : 'com.google.guava', module: 'guava'], [group : 'com.cinchapi', module: 'concourse-driver-java']]
+    exclusions.each { exclusion ->
+        configurations.compile.dependencies.all {
+            if (name != exclusion.module || group != exclusion.group) {
+                exclude group: exclusion.group, module: exclusion.module
+            }
+        }
+    }
+
     dependencies {
-        compile 'com.google.guava:guava:18.0'
+        compile 'com.google.guava:guava:25.1-jre'
         compile 'org.mockito:mockito-all:1.9.5'
         compile 'commons-codec:commons-codec:1.8'
         compile 'com.google.code.findbugs:jsr305:2.0.1'
         compile 'org.slf4j:slf4j-api:1.7.5'
         compile 'ch.qos.logback:logback-classic:1.0.13'
         compile 'joda-time:joda-time:2.2'
-        compile 'org.apache.thrift:libthrift:0.9.3'
+        compile 'org.apache.thrift:libthrift:0.12.0'
         compile 'commons-configuration:commons-configuration:1.9'
-        compile group: 'com.cinchapi', name: 'accent4j', version: '1.0.0-SNAPSHOT', changing:true
-
+        compile group: 'com.cinchapi', name: 'accent4j', version: '1.12.1', changing:true
+        compile 'com.cinchapi:lib-config:1.5.1'
+        
         testCompile 'junit:junit:4.11'
+    }
+
+    test {
+        testLogging {
+            events 'standard_error'
+        }
     }
 
     group = 'com.cinchapi'
     version = globalVersion
+
+    // Versions for some shared (but non-global) dependencies
+    ext.bucketVersion = '1.6.2'
+
+    // Drop the build component from version number and use that for
+    // publishing
+    ext.mavenVersion = version.split('\\.')
+    ext.mavenVersion[3] = ext.mavenVersion[3].replaceAll("[0-9]+-", "-")
+    ext.mavenVersion[3] = ext.mavenVersion[3].replaceAll("[0-9]+", "").trim()
+    ext.mavenVersion = ext.mavenVersion.join(".").replace(".-", "-").replaceAll('\\.$', "")
 
     jar {
         manifest {
@@ -95,9 +159,9 @@ subprojects {
 
     javadoc {
         exclude "**/thrift/**"
-        options.windowTitle 'Concourse Java Driver API'
+        options.windowTitle 'Concourse Java API'
         options.noQualifiers 'all'
-        options.links 'https://docs.oracle.com/javase/7/docs/api/'
+        options.links 'https://docs.oracle.com/javase/8/docs/api/'
     }
 
     task javadocJar(type: Jar, dependsOn: javadoc) {
@@ -114,32 +178,77 @@ subprojects {
         exclude '**/*Suite.class'
     }
 
+    spotless {
+        java {
+            licenseHeaderFile rootProject.file('spotless.java.license')
+            importOrderFile rootProject.file('spotless.java.importerorder')
+            removeUnusedImports()
+            eclipse().configFile rootProject.file('spotless.java.eclipseformat.xml')
+            targetExclude 'src/main/java/com/cinchapi/concourse/thrift/ConcourseService.java'
+        }
+    }
+
     // THESE PROPERTIES SHOULD BE OVERRIDDEN BY EACH SUBPROJECT!
     ext.uploadEnabled = false // Controls if artifacts are uploaded to Maven
     ext.title = "Concourse" // The project's vanity title
     ext.description = "Default" // A short description about the project
     afterEvaluate { project ->
-        if(ext.uploadEnabled){ // Configure subprojects that should be uploaded
-                                // to Maven
-            def mavenTitle = ext.title
-            def mavenDescription = ext.description
+        if (project.ext.uploadEnabled && validateVersion(project.version)) { // Configure subprojects that should be uploaded // to Maven
+            def mavenTitle = project.ext.title
+            def mavenDescription = project.ext.description
+            def mavenVersion = ext.mavenVersion
 
+            publishing {
+                repositories {
+                    maven {
+                        name = 'cloudsmith'
+                        def releasesRepoUrl = "https://api-g.cloudsmith.io/maven/cinchapi/open-source/"
+                        def snapshotsRepoUrl = "https://api-g.cloudsmith.io/maven/cinchapi/open-source-snapshots/"
+                        url = mavenVersion.endsWith('SNAPSHOT') ? snapshotsRepoUrl : releasesRepoUrl
+                        credentials {
+                            username = System.getenv('CLOUDSMITH_API_USER')
+                            password = System.getenv('CLOUDSMITH_API_KEY')
+                        }
+                    }
+                }
+                publications {
+                    maven(MavenPublication) {
+                        from components.java
+                        artifact sourcesJar
+                        artifact javadocJar
+                        groupId group
+                        artifactId project.name
+                        version mavenVersion
+                        // Edit the generated POM to set the dependency version
+                        // for any Cinchapi projects to be the version that is
+                        // configured in the project's POM (X.Y.Z[-SNAPSHOT])
+                        // instead of the fully qualified version used when
+                        // labeling the jar distributed with the server
+                        // (X.Y.Z.B[-SNAPSHOT]).
+                        pom.withXml {
+                            asNode().dependencies.first().each {
+                                def groupId = it.get("groupId").first().value().first()
+                                def artifactId = it.get("artifactId").first().value().first()
+                                if(groupId.equals("com.cinchapi") && artifactId.startsWith("concourse") && !artifactId.equals("concourse-plugin-bundle-generator")) {
+                                    it.get("version").first().value = mavenVersion
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
             uploadArchives {
                 repositories {
                     mavenDeployer {
                         beforeDeployment {
                             MavenDeployment deployment -> signing.signPom(deployment)
                         }
-                        // Drop the build component from version number and use
-                        // that in the POM file
-                        def _version = project.version.split('\\.')
-                        _version[3] = _version[3].replaceAll("[0-9]+-", "-")
-                        _version[3] = _version[3].replaceAll("[0-9]+", "").trim()
-                        _version = _version.join(".").replace(".-", "-").replaceAll('\\.$', "")
-                        pom.version = _version
+                        pom.version = mavenVersion
                         pom.project {
                             name mavenTitle
                             description mavenDescription
+                            url 'https://github.com/cinchapi/concourse'
                             packaging 'jar'
 
                             scm {
@@ -173,7 +282,7 @@ subprojects {
                             asNode().dependencies.first().each {
                                 def groupId = it.get("groupId").first().value().first()
                                 def artifactId = it.get("artifactId").first().value().first()
-                                if(groupId.equals("com.cinchapi") && artifactId.startsWith("concourse")) {
+                                if(groupId.equals("com.cinchapi") && artifactId.startsWith("concourse") && !artifactId.equals("concourse-plugin-bundle-generator")) {
                                     it.get("version").first().value = pom.version
                                 }
                             }

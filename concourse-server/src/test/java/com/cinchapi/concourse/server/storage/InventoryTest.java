@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
+ * Copyright (c) 2013-2022 Cinchapi Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,20 +15,22 @@
  */
 package com.cinchapi.concourse.server.storage;
 
+import java.nio.ByteBuffer;
 import java.util.Set;
 
 import org.junit.Assert;
 import org.junit.Test;
 
 import com.cinchapi.concourse.server.io.FileSystem;
-import com.cinchapi.concourse.server.storage.Inventory;
 import com.cinchapi.concourse.test.ConcourseBaseTest;
+import com.cinchapi.concourse.util.Resources;
 import com.cinchapi.concourse.util.TestData;
 import com.google.common.collect.Sets;
 
 /**
- * Unit tests for the {@link Inventory} class.
- * 
+ * Unit tests for the {@link com.cinchapi.concourse.server.storage.Inventory}
+ * class.
+ *
  * @author Jeff Nelson
  */
 public class InventoryTest extends ConcourseBaseTest {
@@ -49,7 +51,7 @@ public class InventoryTest extends ConcourseBaseTest {
 
     @Test
     public void testAdd() {
-        int count = TestData.getScaleCount() * TestData.getScaleCount();
+        int count = TestData.getScaleCount();
         Set<Long> longs = Sets.newHashSet();
         while (longs.size() < count) {
             longs.add(TestData.getLong());
@@ -62,7 +64,7 @@ public class InventoryTest extends ConcourseBaseTest {
 
     @Test
     public void testContains() {
-        int count = TestData.getScaleCount() * TestData.getScaleCount();
+        int count = TestData.getScaleCount();
         Set<Long> longs = Sets.newHashSet();
         while (longs.size() < count) {
             longs.add(TestData.getLong());
@@ -123,6 +125,22 @@ public class InventoryTest extends ConcourseBaseTest {
         for (long l : longs) {
             Assert.assertTrue(inventory.contains(l));
         }
+    }
+
+    @Test
+    public void testDeserializeReproA() {
+        String file = Resources.getAbsolutePath("/inventory");
+        Inventory inventory = Inventory.create(file);
+        ByteBuffer bytes = FileSystem.readBytes(file);
+        Set<Long> records = Sets.newHashSet();
+        while (bytes.hasRemaining()) {
+            long record = bytes.getLong();
+            if(record != 0) {
+                Assert.assertTrue(inventory.contains(record));
+                records.add(record);
+            }
+        }
+        Assert.assertEquals(records, inventory.getAll());
     }
 
 }

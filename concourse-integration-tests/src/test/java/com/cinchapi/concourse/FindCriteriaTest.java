@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
+ * Copyright (c) 2013-2022 Cinchapi Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,7 +24,7 @@ import java.util.Set;
 import org.junit.Assert;
 import org.junit.Test;
 
-import com.cinchapi.concourse.Timestamp;
+import com.cinchapi.common.base.CheckedExceptions;
 import com.cinchapi.concourse.importer.CsvImporter;
 import com.cinchapi.concourse.importer.Importer;
 import com.cinchapi.concourse.lang.Criteria;
@@ -32,7 +32,7 @@ import com.cinchapi.concourse.test.ConcourseIntegrationTest;
 import com.cinchapi.concourse.test.Variables;
 import com.cinchapi.concourse.thrift.Operator;
 import com.cinchapi.concourse.util.Resources;
-import com.google.common.base.Throwables;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 
 /**
@@ -57,12 +57,12 @@ public class FindCriteriaTest extends ConcourseIntegrationTest {
         try {
             // NOTE: The JDBC API is atrocious :o=
             Class.forName("org.sqlite.JDBC");
-            Connection conn = DriverManager.getConnection("jdbc:sqlite:"
-                    + Resources.get("/college.db").getFile());
+            Connection conn = DriverManager.getConnection(
+                    "jdbc:sqlite:" + Resources.get("/college.db").getFile());
             sql = conn.createStatement();
         }
         catch (Exception e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
 
         super.beforeEachTest();
@@ -76,8 +76,7 @@ public class FindCriteriaTest extends ConcourseIntegrationTest {
         System.out.println("Importing college data into Concourse");
         Importer importer = new CsvImporter(client);
         importer.importFile(Resources.get("/college.csv").getFile());
-        Assert.assertEquals(
-                results,
+        Assert.assertEquals(results,
                 client.find(Criteria.where().key("graduation_rate")
                         .operator(Operator.GREATER_THAN).value(90).at(t1)));
 
@@ -92,39 +91,33 @@ public class FindCriteriaTest extends ConcourseIntegrationTest {
                         .operator(Operator.GREATER_THAN).value(90).build()));
     }
 
-    @Test(expected = IllegalArgumentException.class)
-    public void testNonBuildableStateParamDoesNotSucceed() {
-        client.find(new Object());
-    }
-
     @Test
     public void testSimple() {
-        Assert.assertTrue(hasSameResults(Criteria.where()
-                .key("graduation_rate").operator(Operator.GREATER_THAN)
-                .value(90).build()));
+        Assert.assertTrue(hasSameResults(Criteria.where().key("graduation_rate")
+                .operator(Operator.GREATER_THAN).value(90).build()));
     }
 
     @Test
     public void testSimpleAnd() {
-        Assert.assertTrue(hasSameResults(Criteria.where()
-                .key("graduation_rate").operator(Operator.GREATER_THAN)
-                .value(90).and().key("percent_undergrad_black")
+        Assert.assertTrue(hasSameResults(Criteria.where().key("graduation_rate")
+                .operator(Operator.GREATER_THAN).value(90).and()
+                .key("percent_undergrad_black")
                 .operator(Operator.GREATER_THAN_OR_EQUALS).value(5).build()));
     }
 
     @Test
     public void testSimpleOr() {
-        Assert.assertTrue(hasSameResults(Criteria.where()
-                .key("graduation_rate").operator(Operator.GREATER_THAN)
-                .value(90).or().key("percent_undergrad_black")
+        Assert.assertTrue(hasSameResults(Criteria.where().key("graduation_rate")
+                .operator(Operator.GREATER_THAN).value(90).or()
+                .key("percent_undergrad_black")
                 .operator(Operator.GREATER_THAN_OR_EQUALS).value(5).build()));
     }
 
     @Test
     public void testSimpleAndOr() {
-        Assert.assertTrue(hasSameResults(Criteria.where()
-                .key("graduation_rate").operator(Operator.GREATER_THAN)
-                .value(90).and().key("percent_undergrad_black")
+        Assert.assertTrue(hasSameResults(Criteria.where().key("graduation_rate")
+                .operator(Operator.GREATER_THAN).value(90).and()
+                .key("percent_undergrad_black")
                 .operator(Operator.GREATER_THAN_OR_EQUALS).value(5).or()
                 .key("total_cost_out_state").operator(Operator.GREATER_THAN)
                 .value(50000).build()));
@@ -132,9 +125,9 @@ public class FindCriteriaTest extends ConcourseIntegrationTest {
 
     @Test
     public void testSimpleOrAnd() {
-        Assert.assertTrue(hasSameResults(Criteria.where()
-                .key("graduation_rate").operator(Operator.GREATER_THAN)
-                .value(90).or().key("percent_undergrad_black")
+        Assert.assertTrue(hasSameResults(Criteria.where().key("graduation_rate")
+                .operator(Operator.GREATER_THAN).value(90).or()
+                .key("percent_undergrad_black")
                 .operator(Operator.GREATER_THAN_OR_EQUALS).value(5).and()
                 .key("total_cost_out_state").operator(Operator.GREATER_THAN)
                 .value(50000).build()));
@@ -142,27 +135,19 @@ public class FindCriteriaTest extends ConcourseIntegrationTest {
 
     @Test
     public void testAndGroupOr() {
-        Assert.assertTrue(hasSameResults(Criteria
-                .where()
-                .key("graduation_rate")
-                .operator(Operator.GREATER_THAN)
-                .value(90)
-                .and()
+        Assert.assertTrue(hasSameResults(Criteria.where().key("graduation_rate")
+                .operator(Operator.GREATER_THAN).value(90).and()
                 .group(Criteria.where().key("percent_undergrad_black")
-                        .operator(Operator.GREATER_THAN_OR_EQUALS).value(5)
-                        .or().key("total_cost_out_state")
+                        .operator(Operator.GREATER_THAN_OR_EQUALS).value(5).or()
+                        .key("total_cost_out_state")
                         .operator(Operator.GREATER_THAN).value(50000).build())
                 .build()));
     }
 
     @Test
     public void testOrGroupAnd() {
-        Assert.assertTrue(hasSameResults(Criteria
-                .where()
-                .key("graduation_rate")
-                .operator(Operator.GREATER_THAN)
-                .value(90)
-                .or()
+        Assert.assertTrue(hasSameResults(Criteria.where().key("graduation_rate")
+                .operator(Operator.GREATER_THAN).value(90).or()
                 .group(Criteria.where().key("percent_undergrad_black")
                         .operator(Operator.GREATER_THAN_OR_EQUALS).value(5)
                         .and().key("total_cost_out_state")
@@ -172,8 +157,7 @@ public class FindCriteriaTest extends ConcourseIntegrationTest {
 
     @Test
     public void testGroupAndOrGroupAnd() {
-        Assert.assertTrue(hasSameResults(Criteria
-                .where()
+        Assert.assertTrue(hasSameResults(Criteria.where()
                 .group(Criteria.where().key("graduation_rate")
                         .operator(Operator.GREATER_THAN).value(90).and()
                         .key("yield_men").operator(Operator.EQUALS).value(20)
@@ -188,18 +172,54 @@ public class FindCriteriaTest extends ConcourseIntegrationTest {
 
     @Test
     public void testGroupOrAndGroupOr() {
-        Assert.assertTrue(hasSameResults(Criteria
-                .where()
+        Assert.assertTrue(hasSameResults(Criteria.where()
                 .group(Criteria.where().key("graduation_rate")
                         .operator(Operator.GREATER_THAN).value(90).or()
                         .key("yield_men").operator(Operator.EQUALS).value(20)
                         .build())
                 .and()
                 .group(Criteria.where().key("percent_undergrad_black")
-                        .operator(Operator.GREATER_THAN_OR_EQUALS).value(5)
-                        .or().key("total_cost_out_state")
+                        .operator(Operator.GREATER_THAN_OR_EQUALS).value(5).or()
+                        .key("total_cost_out_state")
                         .operator(Operator.GREATER_THAN).value(50000).build())
                 .build()));
+    }
+
+    @Test
+    public void testReproCON_634() {
+        client.find("foo = \"a and b\"");
+        client.find(Criteria.where().key("foo").operator(Operator.EQUALS)
+                .value("\"a and b\"").build());
+        Assert.assertTrue(true); // lack of Exception means test passes
+    }
+
+    @Test
+    public void testFindCriteriaImplicitBuild() {
+        Assert.assertTrue(hasSameResults(Criteria.where()
+                .group(Criteria.where().key("graduation_rate")
+                        .operator(Operator.GREATER_THAN).value(90).or()
+                        .key("yield_men").operator(Operator.EQUALS).value(20))
+                .and()
+                .group(Criteria.where().key("percent_undergrad_black")
+                        .operator(Operator.GREATER_THAN_OR_EQUALS).value(5).or()
+                        .key("total_cost_out_state")
+                        .operator(Operator.GREATER_THAN).value(50000)
+                        .build())));
+    }
+
+    @Test
+    public void testFindCriteriaTimestampValueBetweenOperator() {
+        Timestamp a = Timestamp.now();
+        Timestamp b = Timestamp.now();
+        Timestamp c = Timestamp.now();
+        Timestamp d = Timestamp.now();
+        Timestamp e = Timestamp.now();
+        client.add("foo", b, 1);
+        client.add("foo", c, 2);
+        client.add("foo", e, 3);
+        Criteria criteria = Criteria.where().key("foo")
+                .operator(Operator.BETWEEN).value(a).value(d);
+        Assert.assertEquals(ImmutableSet.of(1L, 2L), client.find(criteria));
     }
 
     /**
@@ -211,8 +231,8 @@ public class FindCriteriaTest extends ConcourseIntegrationTest {
      */
     private boolean hasSameResults(Criteria criteria) {
         try {
-            Set<Object> a = Sets.newHashSet(client.get("ipeds_id",
-                    client.find(criteria)).values());
+            Set<Object> a = Sets.newHashSet(
+                    client.get("ipeds_id", client.find(criteria)).values());
             String query = "SELECT ipeds_id FROM data WHERE "
                     + criteria.toString();
             ResultSet rs = sql.executeQuery(query);
@@ -229,7 +249,7 @@ public class FindCriteriaTest extends ConcourseIntegrationTest {
 
         }
         catch (Exception e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 

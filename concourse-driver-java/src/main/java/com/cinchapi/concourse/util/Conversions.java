@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,10 +15,10 @@
  */
 package com.cinchapi.concourse.util;
 
+import java.util.function.Function;
+
 import com.cinchapi.concourse.Timestamp;
 import com.cinchapi.concourse.thrift.TObject;
-import com.google.common.base.Function;
-import com.google.common.base.Functions;
 
 /**
  * A utility class that defines some {@link Function Functions} to perform
@@ -35,7 +35,7 @@ public final class Conversions {
      * @return the conversion function
      */
     public static Function<Object, TObject> javaToThrift() {
-        return JAVA_TO_THRIFT_FUNCTION;
+        return Convert::javaToThrift;
     }
 
     /**
@@ -44,7 +44,17 @@ public final class Conversions {
      * @return the (non) conversion function
      */
     public static <T> Function<T, T> none() {
-        return Functions.identity();
+        return Function.identity();
+    }
+
+    /**
+     * Return a function to perform a conversion from a possible {@link TObject}
+     * to a java {#link Object}.
+     * 
+     * @return
+     */
+    public static Function<Object, Object> possibleThriftToJava() {
+        return Convert::possibleThriftToJava;
     }
 
     /**
@@ -54,7 +64,7 @@ public final class Conversions {
      * @return the conversion function
      */
     public static Function<TObject, Object> thriftToJava() {
-        return THRIFT_TO_JAVA_FUNCTION;
+        return Convert::thriftToJava;
     }
 
     /**
@@ -68,16 +78,9 @@ public final class Conversions {
      * 
      * @return the conversion function
      */
+    @SuppressWarnings("unchecked")
     public static <T> Function<TObject, T> thriftToJavaCasted() {
-        return new Function<TObject, T>() {
-
-            @SuppressWarnings("unchecked")
-            @Override
-            public T apply(TObject input) {
-                return (T) thriftToJava().apply(input);
-            }
-
-        };
+        return input -> (T) thriftToJava().apply(input);
     }
 
     /**
@@ -88,44 +91,8 @@ public final class Conversions {
      * @return the conversion function
      */
     public static Function<Long, Timestamp> timestampToMicros() {
-        return TIMESTAMP_TO_MICROS;
+        return Timestamp::fromMicros;
     }
-
-    /**
-     * Function returned in {@link #javaToThrift()}.
-     */
-    private static final Function<Object, TObject> JAVA_TO_THRIFT_FUNCTION = new Function<Object, TObject>() {
-
-        @Override
-        public TObject apply(Object input) {
-            return Convert.javaToThrift(input);
-        }
-
-    };
-
-    /**
-     * Function returned in {@link #thriftToJava()}.
-     */
-    private static final Function<TObject, Object> THRIFT_TO_JAVA_FUNCTION = new Function<TObject, Object>() {
-
-        @Override
-        public Object apply(TObject input) {
-            return Convert.thriftToJava(input);
-        }
-
-    };
-
-    /**
-     * Function returned in {@link #timestampToMicros()}.
-     */
-    private static final Function<Long, Timestamp> TIMESTAMP_TO_MICROS = new Function<Long, Timestamp>() {
-
-        @Override
-        public Timestamp apply(Long input) {
-            return Timestamp.fromMicros(input);
-        }
-
-    };
 
     private Conversions() {/* noop */}
 

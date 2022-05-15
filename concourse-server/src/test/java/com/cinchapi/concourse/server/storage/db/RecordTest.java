@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
+ * Copyright (c) 2013-2022 Cinchapi Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,18 +24,19 @@ import org.junit.Test;
 import com.cinchapi.concourse.server.io.Byteable;
 import com.cinchapi.concourse.server.io.Composite;
 import com.cinchapi.concourse.server.storage.Action;
-import com.cinchapi.concourse.server.storage.db.Record;
-import com.cinchapi.concourse.server.storage.db.Revision;
+import com.cinchapi.concourse.test.Variables;
 import com.cinchapi.concourse.time.Time;
 import com.cinchapi.concourse.util.Numbers;
 import com.cinchapi.concourse.util.TestData;
+import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Multimap;
 import com.google.common.collect.Sets;
 
 /**
- * Unit tests for {@link Record} and its subclasses.
- * 
- * 
+ * Unit tests for {@link com.cinchapi.concourse.server.storage.db.Record} and
+ * its subclasses.
+ *
  * @author Jeff Nelson
  * @param <L>
  * @param <K>
@@ -136,8 +137,8 @@ public abstract class RecordTest<L extends Byteable & Comparable<L>, K extends B
         while (k2 == null || k1.equals(k2)) {
             k2 = getKey();
         }
-        Assert.assertFalse(getRecord(locator, k1)
-                .equals(getRecord(locator, k2)));
+        Assert.assertFalse(
+                getRecord(locator, k1).equals(getRecord(locator, k2)));
     }
 
     @Test
@@ -148,36 +149,36 @@ public abstract class RecordTest<L extends Byteable & Comparable<L>, K extends B
         Set<V> values = populateRecord(record, locator, key);
         Assert.assertEquals(values, record.get(key));
     }
-    
+
     @Test
-    public void testDescribe(){
+    public void testDescribe() {
         L locator = getLocator();
         Set<K> keys = Sets.newHashSet();
         record = getRecord(locator);
-        for(int i = 0; i < TestData.getScaleCount(); i++){
+        for (int i = 0; i < TestData.getScaleCount(); i++) {
             K key = getKey();
             keys.add(key);
             populateRecord(record, locator, key);
         }
-        Assert.assertEquals(keys, record.describe());
+        Assert.assertEquals(keys, record.keys());
     }
-    
+
     @Test
-    public void testDescribeWithTime(){
+    public void testDescribeWithTime() {
         L locator = getLocator();
         Set<K> keys = Sets.newHashSet();
         record = getRecord(locator);
-        for(int i = 0; i < TestData.getScaleCount(); i++){
+        for (int i = 0; i < TestData.getScaleCount(); i++) {
             K key = getKey();
             keys.add(key);
             populateRecord(record, locator, key);
         }
         long timestamp = Time.now();
-        for(int i = 0; i < TestData.getScaleCount(); i++){
+        for (int i = 0; i < TestData.getScaleCount(); i++) {
             K key = getKey();
             populateRecord(record, locator, key);
         }
-        Assert.assertEquals(keys, record.describe(timestamp));
+        Assert.assertEquals(keys, record.keys(timestamp));
     }
 
     @SuppressWarnings("unchecked")
@@ -192,8 +193,8 @@ public abstract class RecordTest<L extends Byteable & Comparable<L>, K extends B
         for (int i = 0; i < count; i++) {
             if(TestData.getInt() % 3 == 0) {
                 Object[] array;
-                V value = (V) (array = (values.toArray()))[Math.abs(TestData
-                        .getInt()) % array.length];
+                V value = (V) (array = (values.toArray()))[Math
+                        .abs(TestData.getInt()) % array.length];
                 record.append(getRevision(locator, key, value));
             }
             else if(TestData.getInt() % 5 == 0) {
@@ -249,9 +250,9 @@ public abstract class RecordTest<L extends Byteable & Comparable<L>, K extends B
         }
         Assert.assertTrue(record.get(key).contains(value));
     }
-    
+
     @Test
-    public void testIsEmpty(){
+    public void testIsEmpty() {
         L locator = getLocator();
         K key = getKey();
         V value = getValue();
@@ -260,8 +261,55 @@ public abstract class RecordTest<L extends Byteable & Comparable<L>, K extends B
         record.append(getRevision(locator, key, value));
         Assert.assertFalse(record.isEmpty());
         record.append(getRevision(locator, key, value));
-        Assert.assertTrue(record.describe().isEmpty());
+        Assert.assertTrue(record.keys().isEmpty());
         Assert.assertFalse(record.isEmpty());
+    }
+
+    @Test
+    public void testCardinality() {
+        L locator = getLocator();
+        Record<L, K, V> record = getRecord(locator);
+        Set<K> keys = Sets.newHashSet();
+        for (int i = 0; i < TestData.getScaleCount(); ++i) {
+            K key = getKey();
+            V value = getValue();
+            Revision<L, K, V> revision = getRevision(locator, key, value);
+            record.append(revision);
+            keys.add(key);
+        }
+        Assert.assertEquals(keys.size(), record.cardinality());
+    }
+
+    @Test
+    public void testBrowse() {
+        Multimap<K, V> expected = HashMultimap.create();
+        L locator = getLocator();
+        record = getRecord(locator);
+        for (int i = 0; i < TestData.getScaleCount(); i++) {
+            K key = getKey();
+            Set<V> values = populateRecord(record, locator, key);
+            expected.putAll(key, values);
+        }
+        Assert.assertEquals(expected.asMap(), record.getAll());
+    }
+
+    @Test
+    public void testBrowseWithTime() {
+        Multimap<K, V> expected = HashMultimap.create();
+        L locator = Variables.register("locator", getLocator());
+        record = Variables.register("record", getRecord(locator));
+        for (int i = 0; i < TestData.getScaleCount(); i++) {
+            K key = Variables.register("key", getKey());
+            Set<V> values = populateRecord(record, locator, key);
+            Variables.register("values", values);
+            expected.putAll(key, values);
+        }
+        long timestamp = Time.now();
+        for (int i = 0; i < TestData.getScaleCount(); i++) {
+            K key = getKey();
+            populateRecord(record, locator, key);
+        }
+        Assert.assertEquals(expected.asMap(), record.getAll(timestamp));
     }
 
     protected abstract K getKey();

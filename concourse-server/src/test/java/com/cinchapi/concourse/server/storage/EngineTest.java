@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -17,10 +17,13 @@ package com.cinchapi.concourse.server.storage;
 
 import java.io.File;
 import java.lang.reflect.Method;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import org.junit.Assert;
 import org.junit.Rule;
@@ -28,10 +31,9 @@ import org.junit.Test;
 import org.junit.rules.TestWatcher;
 import org.junit.runner.Description;
 
+import com.cinchapi.common.reflect.Reflection;
 import com.cinchapi.concourse.server.concurrent.Threads;
 import com.cinchapi.concourse.server.io.FileSystem;
-import com.cinchapi.concourse.server.storage.Engine;
-import com.cinchapi.concourse.server.storage.Store;
 import com.cinchapi.concourse.server.storage.db.Database;
 import com.cinchapi.concourse.server.storage.temp.Buffer;
 import com.cinchapi.concourse.server.storage.temp.Write;
@@ -42,13 +44,14 @@ import com.cinchapi.concourse.time.Time;
 import com.cinchapi.concourse.util.Convert;
 import com.cinchapi.concourse.util.Random;
 import com.cinchapi.concourse.util.TestData;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 
 /**
- * Unit tests for {@link Engine}.
- * 
+ * Unit tests for {@link com.cinchapi.concourse.server.storage.Engine}.
+ *
  * @author Jeff Nelson
  */
 public class EngineTest extends BufferedStoreTest {
@@ -70,8 +73,8 @@ public class EngineTest extends BufferedStoreTest {
         // NOTE: This test is EXPECTED to print a NoSuchFileException
         // stacktrace. It can be ignored.
         String loc = TestData.DATA_DIR + File.separator + Time.now();
-        final Engine engine = new Engine(loc + File.separator + "buffer", loc
-                + File.separator + "db");
+        final Engine engine = new Engine(loc + File.separator + "buffer",
+                loc + File.separator + "db");
         engine.start();
         for (int i = 0; i < 1000; i++) {
             engine.accept(Write.add("foo", Convert.javaToThrift("bar"), i));
@@ -81,7 +84,8 @@ public class EngineTest extends BufferedStoreTest {
 
             @Override
             public void run() {
-                engine.find("foo", Operator.EQUALS, Convert.javaToThrift("bar"));
+                engine.find("foo", Operator.EQUALS,
+                        Convert.javaToThrift("bar"));
             }
 
         });
@@ -93,15 +97,13 @@ public class EngineTest extends BufferedStoreTest {
         Assert.assertTrue(true); // if we reach here, this means that the Engine
                                  // was able to break out of the transport
                                  // exception
-        System.out
-                .println("[INFO] You can ignore the NoSuchFileException stack trace above");
     }
 
     @Test
     public void testNoBufferTransportBlockingIfWritesAreWithinThreshold() {
         String loc = TestData.DATA_DIR + File.separator + Time.now();
-        final Engine engine = new Engine(loc + File.separator + "buffer", loc
-                + File.separator + "db");
+        final Engine engine = new Engine(loc + File.separator + "buffer",
+                loc + File.separator + "db");
         Variables.register("now", Time.now());
         engine.start();
         engine.add(TestData.getSimpleString(), TestData.getTObject(),
@@ -117,8 +119,9 @@ public class EngineTest extends BufferedStoreTest {
     public void testNoDuplicateDataIfUnexpectedShutdownOccurs()
             throws Exception {
         Engine engine = (Engine) store;
-        Buffer buffer = (Buffer) engine.buffer;
-        Database db = (Database) engine.destination;
+        Buffer buffer = (Buffer) engine.limbo;
+        Reflection.set("transportRateMultiplier", 1, buffer); // (authorized)
+        Database db = (Database) engine.durable;
         Method method = buffer.getClass().getDeclaredMethod("canTransport");
         method.setAccessible(true);
         int count = 0;
@@ -132,35 +135,117 @@ public class EngineTest extends BufferedStoreTest {
                                               // call db.triggerSync()
             buffer.transport(db);
         }
-        db.triggerSync();
+        db.sync();
         engine = new Engine(buffer.getBackingStore(), db.getBackingStore());
         engine.start(); // Simulate unexpected shutdown by "restarting" the
                         // Engine
-        while ((boolean) method.invoke(engine.buffer)) { // wait until the first
-                                                         // page in the buffer
-                                                         // (which contains the
-                                                         // same data that was
-                                                         // previously
-                                                         // transported) is done
-                                                         // transporting again
+        while ((boolean) method.invoke(engine.limbo)) { // wait until the first
+                                                        // page in the buffer
+                                                        // (which contains the
+                                                        // same data that was
+                                                        // previously
+                                                        // transported) is done
+                                                        // transporting again
             Random.sleep();
         }
         for (int i = 0; i < count; i++) {
-            Assert.assertTrue(engine.find("count", Operator.EQUALS,
-                    Convert.javaToThrift(i)).contains(
-                    Integer.valueOf(i).longValue()));
+            Assert.assertTrue(engine
+                    .find("count", Operator.EQUALS, Convert.javaToThrift(i))
+                    .contains(Integer.valueOf(i).longValue()));
         }
+    }
+
+    @Test
+    public void testReproGH_441() throws Exception {
+        // Unexpected shutdown should not allow duplicate Write versions to by
+        // transferred
+        Engine engine = (Engine) store;
+        Buffer buffer = (Buffer) engine.limbo;
+        Database db = (Database) engine.durable;
+        Method method = buffer.getClass().getDeclaredMethod("canTransport");
+        method.setAccessible(true);
+        buffer.insert(Write.add("name", Convert.javaToThrift("jeff"), 1));
+        buffer.insert(Write.add("name", Convert.javaToThrift("jeff"), 2));
+        buffer.insert(Write.remove("name", Convert.javaToThrift("jeff"), 2));
+        buffer.insert(Write.add("name", Convert.javaToThrift("jeff"), 2));
+        buffer.insert(Write.remove("name", Convert.javaToThrift("jeff"), 2));
+        while (!(boolean) method.invoke(buffer)) { // Fill the page so the
+                                                   // buffer can transport
+            engine.add("count", Convert.javaToThrift(Time.now()), Time.now());
+        }
+        for (int i = 0; i < 6; ++i) {
+            buffer.transport(db);
+        }
+        db.sync();
+        engine.stop();
+        engine = new Engine(buffer.getBackingStore(), db.getBackingStore());
+        engine.start(); // Simulate unexpected shutdown by "restarting" the
+                        // Engine
+        db = (Database) engine.durable;
+        while ((boolean) method.invoke(engine.limbo)) { // wait until the first
+                                                        // page in the buffer
+                                                        // (which contains the
+                                                        // same data that was
+                                                        // previously
+                                                        // transported) is done
+                                                        // transporting again
+            Random.sleep();
+        }
+        Iterator<Write> it = db.iterator();
+        Set<Long> versions = new HashSet<>();
+        while (it.hasNext()) {
+            Assert.assertTrue(versions.add(it.next().getVersion()));
+        }
+    }
+
+    @Test
+    public void testReproGH_442() throws Exception {
+        // Unexpected shutdown should not allow consecutive Writes that are not
+        // properly offset
+        Engine engine = (Engine) store;
+        Buffer buffer = (Buffer) engine.limbo;
+        Database db = (Database) engine.durable;
+        Method method = buffer.getClass().getDeclaredMethod("canTransport");
+        method.setAccessible(true);
+        buffer.insert(Write.add("name", Convert.javaToThrift("jeff"), 1));
+        buffer.insert(Write.remove("name", Convert.javaToThrift("jeff"), 1));
+        buffer.insert(Write.add("name", Convert.javaToThrift("jeff"), 2));
+        buffer.insert(Write.remove("name", Convert.javaToThrift("jeff"), 2));
+        buffer.insert(Write.add("name", Convert.javaToThrift("jeff"), 2));
+        while (!(boolean) method.invoke(buffer)) { // Fill the page so the
+                                                   // buffer can transport
+            engine.add("count", Convert.javaToThrift(Time.now()), Time.now());
+        }
+        for (int i = 0; i < 4; ++i) {
+            buffer.transport(db);
+        }
+        db.sync();
+        engine = new Engine(buffer.getBackingStore(), db.getBackingStore());
+        engine.start(); // Simulate unexpected shutdown by "restarting" the
+                        // Engine
+        while ((boolean) method.invoke(engine.limbo)) { // wait until the first
+                                                        // page in the buffer
+                                                        // (which contains the
+                                                        // same data that was
+                                                        // previously
+                                                        // transported) is done
+                                                        // transporting again
+            Random.sleep();
+        }
+        engine.find("name", Operator.EQUALS, Convert.javaToThrift("jeff"));
     }
 
     @Test
     public void testBufferTransportBlockingIfWritesAreNotWithinThreshold() {
         String loc = TestData.DATA_DIR + File.separator + Time.now();
-        final Engine engine = new Engine(loc + File.separator + "buffer", loc
-                + File.separator + "db");
+        final Engine engine = new Engine(loc + File.separator + "buffer",
+                loc + File.separator + "db");
         engine.start();
         engine.add(TestData.getSimpleString(), TestData.getTObject(),
                 TestData.getLong());
-        Threads.sleep(Engine.BUFFER_TRANSPORT_THREAD_ALLOWABLE_INACTIVITY_THRESHOLD_IN_MILLISECONDS + 30);
+        Threads.sleep(
+                Engine.BUFFER_TRANSPORT_THREAD_ALLOWABLE_INACTIVITY_THRESHOLD_IN_MILLISECONDS
+                        + 30);
         engine.add(TestData.getSimpleString(), TestData.getTObject(),
                 TestData.getLong());
         Assert.assertTrue(engine.bufferTransportThreadHasEverPaused.get());
@@ -174,11 +259,11 @@ public class EngineTest extends BufferedStoreTest {
         List<String> colleges = Lists.newArrayList("Boston College",
                 "Yale University", "Harvard University");
         for (String college : colleges) {
-            engine.destination.accept(Write.add("name",
+            engine.durable.accept(Write.add("name",
                     Convert.javaToThrift(college), Time.now()));
         }
-        engine.buffer.insert(Write.add("name", Convert.javaToThrift("jeffery"),
-                Time.now()));
+        engine.limbo.insert(
+                Write.add("name", Convert.javaToThrift("jeffery"), Time.now()));
         Set<TObject> keys = engine.browse("name").keySet();
         Assert.assertEquals(Convert.javaToThrift("Boston College"),
                 Iterables.get(keys, 0));
@@ -200,7 +285,7 @@ public class EngineTest extends BufferedStoreTest {
         engine.remove("name", Convert.javaToThrift("xyz"), 2);
         Assert.assertTrue(engine.select(2).isEmpty()); // assert record
                                                        // presently has no data
-        Assert.assertEquals(engine.browse(), Sets.<Long> newHashSet(
+        Assert.assertEquals(engine.getAllRecords(), Sets.<Long> newHashSet(
                 new Long(1), new Long(2), new Long(3), new Long(4)));
     }
 
@@ -232,13 +317,20 @@ public class EngineTest extends BufferedStoreTest {
 
             });
             thread.start();
-            Threads.sleep((int) (1.2 * Engine.BUFFER_TRANSPORT_THREAD_HUNG_DETECTION_THRESOLD_IN_MILLISECONDS)
+            Threads.sleep((int) (1.2
+                    * Engine.BUFFER_TRANSPORT_THREAD_HUNG_DETECTION_THRESOLD_IN_MILLISECONDS)
                     + Engine.BUFFER_TRANSPORT_THREAD_HUNG_DETECTION_FREQUENCY_IN_MILLISECONDS);
-            Assert.assertTrue(engine.bufferTransportThreadHasEverAppearedHung
-                    .get());
-            Threads.sleep((int) (Engine.BUFFER_TRANSPORT_THREAD_HUNG_DETECTION_THRESOLD_IN_MILLISECONDS * 1.2));
-            Assert.assertTrue(engine.bufferTransportThreadHasEverBeenRestarted
-                    .get());
+            while (!engine.bufferTransportThreadHasEverAppearedHung.get()) {
+                System.out.println("Waiting to detect hung thread...");
+                continue; // spin until the thread hang is detected
+            }
+            Assert.assertTrue(
+                    engine.bufferTransportThreadHasEverAppearedHung.get());
+            Threads.sleep(
+                    (int) (Engine.BUFFER_TRANSPORT_THREAD_HUNG_DETECTION_THRESOLD_IN_MILLISECONDS
+                            * 1.2));
+            Assert.assertTrue(
+                    engine.bufferTransportThreadHasEverBeenRestarted.get());
             engine.stop();
             FileSystem.deleteDirectory(loc);
         }
@@ -316,8 +408,7 @@ public class EngineTest extends BufferedStoreTest {
                 }
                 while (!done.get()) {
                     if(!done.get()) {
-                        engine.add(
-                                "foo",
+                        engine.add("foo",
                                 Convert.javaToThrift(Long.toString(Time.now())),
                                 Time.now());
                     }
@@ -350,6 +441,23 @@ public class EngineTest extends BufferedStoreTest {
     }
 
     @Test
+    public void reproCON_516() {
+        Engine engine = (Engine) store;
+        Buffer buffer = (Buffer) engine.limbo;
+        int count = 0;
+        while (!(boolean) Reflection.call(buffer, "canTransport")) {
+            add("name", Convert.javaToThrift("Jeff"), Time.now());
+            count++;
+        }
+        buffer.transport(engine.durable);
+        add("name", Convert.javaToThrift("Jeff"), Time.now());
+        count++;
+        Set<Long> matches = engine.find("name", Operator.EQUALS,
+                Convert.javaToThrift("jeff"));
+        Assert.assertEquals(count, matches.size());
+    }
+
+    @Test
     public void reproCON_239AuditRecord() throws InterruptedException {
         final Engine engine = (Engine) store;
         int count = TestData.getScaleCount();
@@ -368,8 +476,7 @@ public class EngineTest extends BufferedStoreTest {
                 }
                 while (!done.get()) {
                     if(!done.get()) {
-                        engine.add(
-                                "foo",
+                        engine.add("foo",
                                 Convert.javaToThrift(Long.toString(Time.now())),
                                 1);
                     }
@@ -383,9 +490,9 @@ public class EngineTest extends BufferedStoreTest {
             @Override
             public void run() {
                 go.set(true);
-                Map<Long, String> data = engine.audit(1);
+                Map<Long, List<String>> data = engine.review(1);
                 done.set(true);
-                Map<Long, String> data1 = engine.audit(1);
+                Map<Long, List<String>> data1 = engine.review(1);
                 Variables.register("data_size", data.size());
                 Variables.register("data1_size", data1.size());
                 succeeded.set(data.size() == data1.size()
@@ -399,6 +506,178 @@ public class EngineTest extends BufferedStoreTest {
         read.join();
         write.join();
         Assert.assertTrue(succeeded.get());
+    }
+
+    @Test(timeout = 5000)
+    public void testReproCON_668() throws Exception {
+        add("major", Convert.javaToThrift("Business"), 1);
+        add("major", Convert.javaToThrift("business"), 2);
+        Engine engine = (Engine) store;
+        while (!Reflection.<Boolean> call(engine.limbo, "canTransport")) { // authorized
+            add("foo", Convert.javaToThrift(Time.now()), Time.now());
+        }
+        while (Reflection.<Boolean> call(engine.limbo, "canTransport")) { // authorized
+            engine.limbo.transport(engine.durable);
+        }
+        remove("major", Convert.javaToThrift("business"), 2);
+        add("major", Convert.javaToThrift("business"), 3);
+        try {
+            store.find("major", Operator.REGEX,
+                    Convert.javaToThrift(".*business.*"));
+        }
+        catch (Exception ex) {}
+        add("major", Convert.javaToThrift("computer science"), 3); // ensure
+                                                                   // there is
+                                                                   // no
+                                                                   // deadlock...
+        Assert.assertEquals(
+                ImmutableSet.of(Convert.javaToThrift("computer science"),
+                        Convert.javaToThrift("business")),
+                store.select("major", 3));
+    }
+
+    @Test
+    public void testReproCON_667() throws Exception {
+        add("major", Convert.javaToThrift("Business"), 1);
+        add("major", Convert.javaToThrift("business"), 2);
+        Engine engine = (Engine) store;
+        while (!Reflection.<Boolean> call(engine.limbo, "canTransport")) { // authorized
+            add("foo", Convert.javaToThrift(Time.now()), Time.now());
+        }
+        while (Reflection.<Boolean> call(engine.limbo, "canTransport")) { // authorized
+            engine.limbo.transport(engine.durable);
+        }
+        remove("major", Convert.javaToThrift("business"), 2);
+        add("major", Convert.javaToThrift("business"), 3);
+        Exception e = null;
+        try {
+            store.find("major", Operator.REGEX,
+                    Convert.javaToThrift(".*business.*"));
+        }
+        catch (Exception ex) {
+            e = ex;
+        }
+        add("major", Convert.javaToThrift("computer science"), 3); // ensure
+                                                                   // there is
+                                                                   // no
+                                                                   // deadlock...
+        Assert.assertEquals(
+                ImmutableSet.of(Convert.javaToThrift("computer science"),
+                        Convert.javaToThrift("business")),
+                store.select("major", 3));
+
+        if(e != null) {
+            e.printStackTrace();
+            throw e;
+        }
+        Assert.assertNull(e);
+    }
+
+    @Test
+    public void testCommitVersionSplitBetweenBufferAndDatabase() {
+        Engine engine = (Engine) store;
+        Buffer buffer = (Buffer) engine.limbo;
+        Database db = (Database) engine.durable;
+        engine.bufferTransportThreadSleepInMs = Integer.MAX_VALUE;
+        AtomicOperation atomic = engine.startAtomicOperation();
+        atomic.add("name", Convert.javaToThrift("jeff"), 1);
+        atomic.remove("name", Convert.javaToThrift("jeff"), 1);
+        long before = Time.now();
+        atomic.commit();
+        long after = Time.now();
+        while (!Reflection.<Boolean> call(buffer, "canTransport")) {
+            engine.add("foo", Convert.javaToThrift("bar"), Time.now());
+        }
+        buffer.transport(db);
+        db.sync();
+        Iterator<Write> it = db.iterator();
+        long version = 0;
+        while (it.hasNext()) {
+            Write write = it.next();
+            version = write.getVersion();
+        }
+        Assert.assertEquals(ImmutableSet.of(), store.find("name",
+                Operator.EQUALS, Convert.javaToThrift("jeff")));
+        Assert.assertEquals(ImmutableSet.of(), store.find(before, "name",
+                Operator.EQUALS, Convert.javaToThrift("jeff")));
+        Assert.assertEquals(ImmutableSet.of(), store.find(after, "name",
+                Operator.EQUALS, Convert.javaToThrift("jeff")));
+        Assert.assertEquals(ImmutableSet.of(), store.find(version, "name",
+                Operator.EQUALS, Convert.javaToThrift("jeff")));
+        engine.stop();
+        engine.bufferTransportThreadSleepInMs = Integer.MAX_VALUE;
+        engine.start();
+        it = db.iterator();
+        while (it.hasNext()) {
+            Write write = it.next();
+            System.out.println(write);
+        }
+        Assert.assertEquals(ImmutableSet.of(), store.find("name",
+                Operator.EQUALS, Convert.javaToThrift("jeff")));
+        Assert.assertEquals(ImmutableSet.of(), store.find(before, "name",
+                Operator.EQUALS, Convert.javaToThrift("jeff")));
+        Assert.assertEquals(ImmutableSet.of(), store.find(after, "name",
+                Operator.EQUALS, Convert.javaToThrift("jeff")));
+        Assert.assertEquals(ImmutableSet.of(), store.find(version, "name",
+                Operator.EQUALS, Convert.javaToThrift("jeff")));
+    }
+
+    @Test
+    public void testSameWriteVersionDatabaseIntersectionDetection() {
+        Engine engine = (Engine) store;
+        Buffer buffer = (Buffer) engine.limbo;
+        Database db = (Database) engine.durable;
+        int count = TestData.getScaleCount();
+        AtomicLong commits = new AtomicLong();
+        AtomicLong expected = new AtomicLong();
+        for (int i = 0; i < count; ++i) {
+            AtomicOperation atomic = engine.startAtomicOperation();
+            int writes = TestData.getScaleCount();
+            for (int j = 0; j < writes; ++j) {
+                atomic.add("name", Convert.javaToThrift("jeff" + i),
+                        Math.abs(TestData.getInt()) % 2 == 0 ? Time.now() : j);
+                expected.incrementAndGet();
+            }
+            atomic.commit();
+            commits.incrementAndGet();
+        }
+        while (Reflection.<Boolean> call(buffer, "canTransport")) {
+            buffer.transport(db);
+        }
+        Set<Long> versions = new HashSet<>();
+        AtomicLong actual = new AtomicLong();
+        Iterator<Write> it = db.iterator();
+        while (it.hasNext()) {
+            versions.add(it.next().getVersion());
+            actual.incrementAndGet();
+        }
+        it = buffer.iterator();
+        while (it.hasNext()) {
+            versions.add(it.next().getVersion());
+            actual.incrementAndGet();
+        }
+        Assert.assertEquals(commits.get(), versions.size());
+        Assert.assertEquals(expected.get(), actual.get());
+        engine.stop();
+        engine.start();
+        buffer = (Buffer) engine.limbo;
+        db = (Database) engine.durable;
+        versions.clear();
+        actual = new AtomicLong(0);
+        it = db.iterator();
+        while (it.hasNext()) {
+            Write write = it.next();
+            versions.add(write.getVersion());
+            actual.incrementAndGet();
+        }
+        it = buffer.iterator();
+        while (it.hasNext()) {
+            Write write = it.next();
+            versions.add(write.getVersion());
+            actual.incrementAndGet();
+        }
+        Assert.assertEquals(commits.get(), versions.size());
+        Assert.assertEquals(expected.get(), actual.get());
     }
 
     // @Test
@@ -450,8 +729,8 @@ public class EngineTest extends BufferedStoreTest {
     @Override
     protected Store getStore() {
         directory = TestData.DATA_DIR + File.separator + Time.now();
-        return new Engine(directory + File.separator + "buffer", directory
-                + File.separator + "database");
+        return new Engine(directory + File.separator + "buffer",
+                directory + File.separator + "database");
     }
 
     @Override

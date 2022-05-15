@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,6 +18,7 @@ package com.cinchapi.concourse.demo;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.junit.Assert;
 import org.junit.Test;
@@ -26,7 +27,6 @@ import com.cinchapi.concourse.Timestamp;
 import com.cinchapi.concourse.test.ConcourseIntegrationTest;
 import com.cinchapi.concourse.thrift.Operator;
 import com.cinchapi.concourse.time.Time;
-import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 
 /**
@@ -86,42 +86,46 @@ public class GettingStartedTest extends ConcourseIntegrationTest {
         }
 
         // Audit
-        Iterator<String> it = client.audit(1).values().iterator();
-        Assert.assertTrue(it.next().startsWith(
-                "ADD name AS John Doe (STRING) IN 1"));
-        Assert.assertTrue(it.next().startsWith(
-                "ADD name AS Johnny Doe (STRING) IN 1"));
-        Assert.assertTrue(it.next().startsWith(
-                "ADD name AS Jonathan Doe (STRING) IN 1"));
-        Assert.assertTrue(it.next().startsWith(
-                "ADD name AS J. Doe (STRING) IN 1"));
+        Iterator<String> it = client.review(1).values().stream()
+                .flatMap(List::stream).iterator();
+        Assert.assertTrue(
+                it.next().startsWith("ADD name AS John Doe (STRING) IN 1"));
+        Assert.assertTrue(
+                it.next().startsWith("ADD name AS Johnny Doe (STRING) IN 1"));
+        Assert.assertTrue(
+                it.next().startsWith("ADD name AS Jonathan Doe (STRING) IN 1"));
+        Assert.assertTrue(
+                it.next().startsWith("ADD name AS J. Doe (STRING) IN 1"));
         Assert.assertTrue(it.next().startsWith("ADD age AS 30 (INTEGER) IN 1"));
         Assert.assertTrue(it.next().startsWith("ADD age AS 30.5 (FLOAT) IN 1"));
         Assert.assertTrue(it.next().startsWith("ADD age AS 30 (STRING) IN 1"));
-        Assert.assertTrue(it.next()
-                .startsWith("ADD age AS true (BOOLEAN) IN 1"));
-        Assert.assertTrue(it.next().startsWith(
-                "REMOVE age AS true (BOOLEAN) IN 1"));
+        Assert.assertTrue(
+                it.next().startsWith("ADD age AS true (BOOLEAN) IN 1"));
+        Assert.assertTrue(
+                it.next().startsWith("REMOVE age AS true (BOOLEAN) IN 1"));
         Assert.assertTrue(it.next().startsWith("ADD baz AS 0 (INTEGER) IN 1"));
         Assert.assertTrue(it.next().startsWith("ADD baz AS 1 (INTEGER) IN 1"));
         Assert.assertTrue(it.next().startsWith("ADD baz AS 2 (INTEGER) IN 1"));
         Assert.assertTrue(it.next().startsWith("ADD baz AS 3 (INTEGER) IN 1"));
         Assert.assertTrue(it.next().startsWith("ADD baz AS 4 (INTEGER) IN 1"));
-        Assert.assertTrue(it.next()
-                .startsWith("REMOVE baz AS 0 (INTEGER) IN 1"));
-        Assert.assertTrue(it.next()
-                .startsWith("REMOVE baz AS 1 (INTEGER) IN 1"));
-        Assert.assertTrue(it.next()
-                .startsWith("REMOVE baz AS 2 (INTEGER) IN 1"));
-        Assert.assertTrue(it.next()
-                .startsWith("REMOVE baz AS 3 (INTEGER) IN 1"));
-        Assert.assertTrue(it.next()
-                .startsWith("REMOVE baz AS 4 (INTEGER) IN 1"));
+        Assert.assertTrue(
+                it.next().startsWith("REMOVE baz AS 0 (INTEGER) IN 1"));
+        Assert.assertTrue(
+                it.next().startsWith("REMOVE baz AS 1 (INTEGER) IN 1"));
+        Assert.assertTrue(
+                it.next().startsWith("REMOVE baz AS 2 (INTEGER) IN 1"));
+        Assert.assertTrue(
+                it.next().startsWith("REMOVE baz AS 3 (INTEGER) IN 1"));
+        Assert.assertTrue(
+                it.next().startsWith("REMOVE baz AS 4 (INTEGER) IN 1"));
         Assert.assertTrue(it.next().startsWith("ADD baz AS 6 (INTEGER) IN 1"));
-        Assert.assertTrue(it.next().startsWith("ADD count AS 1 (INTEGER) IN 1"));
+        Assert.assertTrue(
+                it.next().startsWith("ADD count AS 1 (INTEGER) IN 1"));
 
-        List<String> audit = Lists.newArrayList(client.audit(1).values());
-        it = client.audit("age", 1).values().iterator();
+        List<String> audit = client.review(1).values().stream()
+                .flatMap(List::stream).collect(Collectors.toList());
+        it = client.review("age", 1).values().stream().flatMap(List::stream)
+                .iterator();
         Assert.assertEquals(it.next(), audit.get(4));
         Assert.assertEquals(it.next(), audit.get(5));
         Assert.assertEquals(it.next(), audit.get(6));
@@ -129,52 +133,53 @@ public class GettingStartedTest extends ConcourseIntegrationTest {
         Assert.assertEquals(it.next(), audit.get(8));
 
         // Revert
-        Iterator<Timestamp> it2 = client.audit(1).keySet().iterator();
+        Iterator<Timestamp> it2 = client.review(1).keySet().iterator();
         for (int i = 0; i < 11; i++) {
             it2.next();
-        };
+        } ;
         Timestamp t1 = it2.next();
 
         client.revert("baz", 1, t1);
         Assert.assertEquals(Sets.newHashSet(0, 1, 2), client.select("baz", 1));
 
         // Historical Describe
-        Assert.assertTrue(client.describe(1,
-                Timestamp.fromMicros(Time.now() - 86400000000L)).isEmpty());
+        Assert.assertTrue(client
+                .describe(1, Timestamp.fromMicros(Time.now() - 86400000000L))
+                .isEmpty());
 
-        it2 = client.audit(1).keySet().iterator();
+        it2 = client.review(1).keySet().iterator();
         for (int i = 0; i < 8; i++) {
             it2.next();
-        };
+        } ;
         t1 = it2.next();
         Assert.assertEquals(Sets.newHashSet("name", "age"),
                 client.describe(1, t1));
 
         // Historical Fetch
-        it2 = client.audit(1).keySet().iterator();
+        it2 = client.review(1).keySet().iterator();
         for (int i = 0; i < 1; i++) {
             it2.next();
-        };
+        } ;
         t1 = it2.next();
         Assert.assertEquals(Sets.newHashSet("John Doe", "Johnny Doe"),
                 client.select("name", 1, t1));
 
         // Historical Find
-        t1 = client.audit(50).keySet().iterator().next();
-        Assert.assertTrue(client.find("count", Operator.GREATER_THAN, 50, t1)
-                .isEmpty());
+        t1 = client.review(50).keySet().iterator().next();
+        Assert.assertTrue(
+                client.find("count", Operator.GREATER_THAN, 50, t1).isEmpty());
 
-        t1 = client.audit(500).keySet().iterator().next();
+        t1 = client.review(500).keySet().iterator().next();
         set = client.find("count", Operator.GREATER_THAN, 50, t1);
         for (long i = 51; i <= 500; i++) {
             Assert.assertTrue(set.contains(i));
         }
 
         // Historical Verify
-        it2 = client.audit("age", 1).keySet().iterator();
+        it2 = client.review("age", 1).keySet().iterator();
         for (int i = 0; i < 3; i++) {
             it2.next();
-        };
+        } ;
         t1 = it2.next();
         Assert.assertTrue(client.verify("age", true, 1, t1));
 

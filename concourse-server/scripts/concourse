@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Copyright (c) 2013-2016 Cinchapi Inc.
+# Copyright (c) 2013-2022 Cinchapi Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -40,7 +40,7 @@
 # Default-Start: 2 3 4 5
 # Default-Stop: 0 1 6
 # Short-Description: Concourse Server
-# Description: Concourse is a self-tuning database for high volume transactions and ad-hoc analytics at scale.
+# Description: Concourse is a self-tuning database designed for both transactions and ad-hoc analytics across time.
 ### END INIT INFO
 
 # Options that are passed to Java to configure the Concourse Server runtime.
@@ -57,12 +57,12 @@ JVMOPTS="
 -Dcom.sun.management.jmxremote.authenticate=false
 -Dcom.sun.management.jmxremote.ssl=false
 -XX:+UseThreadPriorities
--XX:ThreadPriorityPolicy=42
 -XX:CompileThreshold=500
 "
 #-------------------------------------------------------------------------------
 # DO NOT MAKE ANY CHANGES BEYOND THIS POINT
 #-------------------------------------------------------------------------------
+SERVICE="Concourse Server"
 
 # Color Variables: See http://stackoverflow.com/questions/5947742/how-to-change-the-output-color-of-echo-in-linux for more options
 ESC="\033["
@@ -76,6 +76,14 @@ TEXT_COLOR_PURPLE=$ESC"0;35m"
 TEXT_COLOR_PURPLE_BOLD=$ESC"1;35m"
 TEXT_COLOR_YELLOW=$ESC"1;33m"
 TEXT_COLOR_RESET=$ESC"0;m"
+
+# Allow the JVM to attempt to hook into native thread prioritization if the application
+# user is root.
+if [ $(id -u) -eq 0 ]; then
+  JVMOPTS=$JVMOPTS"
+  -XX:ThreadPriorityPolicy=1
+  "
+fi
 
 # Random utility functions
 warn () {
@@ -167,7 +175,11 @@ OWD=`pwd`
 # Ensure that this script operates from the application root directory
 cd "${0%/*}"
 APP_HOME="`pwd -P`/.."
-APP_HOME=`cd ${APP_HOME}; pwd`
+APP_HOME=`cd "${APP_HOME}"; pwd`
+if [[ "$APP_HOME" =~ [^a-zA-Z0-9_\-/.] ]]; then
+  printf "${TEXT_COLOR_RED_BOLD}ERROR: $SERVICE is installed at '$APP_HOME', but the absolute path contains invalid characters.\n\nPlease install $SERVICE in a directory whose absolute path does not contain whitespace or parenthesis.${TEXT_COLOR_RESET}"
+  exit 1
+fi
 APP_HOME_PROPERTY="com.cinchapi.concourse.server.home=$APP_HOME"
 BIN_DIR="$APP_HOME/bin"
 JVMOPTS=$JVMOPTS"
@@ -180,10 +192,13 @@ JVMOPTS=$JVMOPTS"
 #
 # The format for this array is alias:cli
 BIN_ALIASES=(
-  debug:dumptool
-  environments:envtool
+  datafiles:data
+  debug:data
+  env:environments
+  envs:environments
+  plugin:plugins
   shell:cash
-  users:useradmin
+  user:users
 )
 
 # This function will return the appropriate CLI for an alias. If the alias
@@ -224,6 +239,15 @@ if [ -z "$JMX_PREF" ]; then
   JMX_PREF="9010"
 fi
 JVMOPTS=${JVMOPTS/jmxremote.port=9010/jmxremote.port=$JMX_PREF}
+
+#remote_debugger_port
+RDP_PREF=`cat $PREFS | grep -e '^remote_debugger_port\s*=\s*[0-9]\{1,\}$' | head -n1 | cut -d'=' -f2 | tr -d ' '`
+if [ ! -z "$RDP_PREF" ] && [ "$RDP_PREF" -ne "0" ]; then
+    JVMOPTS=$JVMOPTS"
+    -Xdebug
+    -Xrunjdwp:transport=dt_socket,server=y,suspend=n,address=$RDP_PREF
+    "
+fi
 
 #heap_size
 HEAP_PREF=`cat $PREFS | grep -e '^heap_size\s*=\s*[0-9]\{1,\}\(m\|M\|mb\|MB\|g\|G\|gb\|GB\)$' | head -n1 | cut -d'=' -f2 | tr -d ' '`
@@ -374,9 +398,9 @@ usage(){
   "force-reload:Force a reload of the configuration by possibly restarting."
   "restart:Stop if running and then start."
   "start:Start in the background as a daemon process."
+  "status:Check if running and get the current pid."
   "stop:Stop if running as a daemon or in another console."
   "threaddump:Request a thread dump if running."
-  "version:Display the version."
   "help:Display this message."
   )
 
@@ -409,13 +433,6 @@ usage(){
     V=${KV[1]}
     printf "  ${TEXT_COLOR_BLUE_BOLD}%-13s${TEXT_COLOR_RESET}     %-40s\n" "$K" "$V"
   done | sort
-}
-
-# Figure of the version of Concourse Server by checking the name of the jar in
-# the $APP_HOME/lib directory
-version(){
-  local version=`ls $APP_HOME/lib | grep concourse-server | cut -d'-' -f3,4,5,6,7,8,9,10 | cut -d'.' -f1,2,3,4`
-  echo $version
 }
 
 # Get the PID for the Concourse Server process
@@ -600,14 +617,14 @@ case "$1" in
   start
   ;;
 
-  'version' | -[Vv] | '--version' | "-version")
-  version=`version`
-  echo "Concourse Server "$version
-  echo "Copyright (c) 2013-2016 Cinchapi Inc."
-  ;;
-
   '')
   start
+  ;;
+
+  -[Vv] | '--version' | "-version")
+  cd $OWD
+  exec bash $BIN_DIR/version "$@"
+  cd - > /dev/null
   ;;
 
   *)

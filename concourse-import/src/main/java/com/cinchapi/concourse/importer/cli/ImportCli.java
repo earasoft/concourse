@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,10 +18,11 @@ package com.cinchapi.concourse.importer.cli;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Modifier;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.text.MessageFormat;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
@@ -33,22 +34,29 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.reflections.Reflections;
+import javax.annotation.Nullable;
 
 import jline.TerminalFactory;
 import jline.console.ConsoleReader;
 
+import org.reflections.Reflections;
+
 import com.beust.jcommander.Parameter;
+import com.cinchapi.common.base.AnyStrings;
+import com.cinchapi.common.base.CheckedExceptions;
+import com.cinchapi.common.groovy.GroovyFiles;
+import com.cinchapi.common.io.Files;
+import com.cinchapi.common.reflect.Reflection;
 import com.cinchapi.concourse.Concourse;
 import com.cinchapi.concourse.cli.CommandLineInterface;
 import com.cinchapi.concourse.cli.Options;
 import com.cinchapi.concourse.importer.CsvImporter;
 import com.cinchapi.concourse.importer.Headered;
 import com.cinchapi.concourse.importer.Importer;
+import com.cinchapi.concourse.importer.JsonImporter;
 import com.cinchapi.concourse.importer.LegacyCsvImporter;
+import com.cinchapi.concourse.importer.debug.ImportDryRunConcourse;
 import com.cinchapi.concourse.util.FileOps;
-import com.cinchapi.concourse.util.Reflection;
-import com.cinchapi.concourse.util.Strings;
 import com.google.common.base.CaseFormat;
 import com.google.common.base.Stopwatch;
 import com.google.common.base.Throwables;
@@ -57,6 +65,8 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Queues;
 import com.google.common.collect.Sets;
+import com.google.common.reflect.ClassPath;
+import com.google.common.reflect.ClassPath.ClassInfo;
 
 /**
  * A CLI that uses the import framework to import data into Concourse.
@@ -71,13 +81,26 @@ public class ImportCli extends CommandLineInterface {
      * using the {@code -t} or {@code --type} flag when invoking the CLI.
      */
     private static Map<String, Class<? extends Importer>> importers = Maps
-            .newHashMapWithExpectedSize(2);
+            .newHashMapWithExpectedSize(3);
     static {
         // NOTE: Be sure to increase the expectedSize parameter for the map when
         // adding additional aliases
         importers.put("csv", CsvImporter.class);
         importers.put(".csv", LegacyCsvImporter.class); // deprecated
+        importers.put("json", JsonImporter.class);
     }
+
+    /**
+     * A reference to the value returned from {@link #getLaunchDirectory()} to
+     * use in static methods.
+     */
+    private static String LAUNCH_DIRECTORY = null;
+
+    /**
+     * A flag that indicates whether the CLI is being used to perform a dry run
+     * import.
+     */
+    private boolean dryRun = false;
 
     /*
      * TODO
@@ -90,16 +113,22 @@ public class ImportCli extends CommandLineInterface {
      * @param args
      */
     public ImportCli(String[] args) {
-        super(new ImportOptions(), args);
+        super(args);
+        LAUNCH_DIRECTORY = getLaunchDirectory();
     }
 
     @Override
     protected void doTask() {
         final ImportOptions opts = (ImportOptions) options;
         final Set<Long> records;
-        final Constructor<? extends Importer> constructor = getConstructor(opts.type);
+        final Constructor<? extends Importer> constructor = getConstructor(
+                opts.type);
+        this.dryRun = opts.dryRun;
+        opts.dynamic.put(Importer.ANNOTATE_DATA_SOURCE_OPTION_NAME,
+                Boolean.toString(opts.annotateDataSource));
         if(opts.data == null) { // Import data from stdin
-            Importer importer = Reflection.newInstance(constructor, concourse);
+            Importer importer = Reflection.newInstance(constructor,
+                    getConcourseConnection(0));
             if(!opts.dynamic.isEmpty()) {
                 importer.setParams(options.dynamic);
             }
@@ -121,8 +150,14 @@ public class ImportCli extends CommandLineInterface {
                         if(options.verbose) {
                             System.out.println(records);
                         }
-                        System.out.println(Strings.format(
-                                "Imported data into {} records", records.size()));
+                        System.out.println(AnyStrings.format(
+                                "Imported data into {} record{}",
+                                records.size(), records.size() > 1 ? "s" : ""));
+                        if(dryRun) {
+                            System.out.println(
+                                    ((ImportDryRunConcourse) getConcourseConnection(
+                                            0)).dump());
+                        }
                     }
 
                 }));
@@ -134,20 +169,20 @@ public class ImportCli extends CommandLineInterface {
                                                 // not piped) and display a
                                                 // prompt
 
-                                @Override
-                                public void run() {
-                                    try {
-                                        Thread.sleep(100);
-                                        if(lock.compareAndSet(false, true)) {
-                                            System.out
-                                                    .println("Importing from stdin. Press "
-                                                            + "CTRL + C when finished");
-                                        }
-                                    }
-                                    catch (InterruptedException e) {}
+                        @Override
+                        public void run() {
+                            try {
+                                Thread.sleep(100);
+                                if(lock.compareAndSet(false, true)) {
+                                    System.out.println(
+                                            "Importing from stdin. Press "
+                                                    + "CTRL + C when finished");
                                 }
+                            }
+                            catch (InterruptedException e) {}
+                        }
 
-                            }).start();
+                    }).start();
                     while ((line = reader.readLine()) != null) {
                         try {
                             lock.set(true);
@@ -176,8 +211,9 @@ public class ImportCli extends CommandLineInterface {
         }
         else {
             String path = FileOps.expandPath(opts.data, getLaunchDirectory());
-            Collection<String> files = FileOps.isDirectory(path) ? scan(Paths
-                    .get(path)) : ImmutableList.of(path);
+            Collection<String> files = FileOps.isDirectory(path)
+                    ? scan(Paths.get(path))
+                    : ImmutableList.of(path);
             Stopwatch watch = Stopwatch.createUnstarted();
             if(files.size() > 1) {
                 records = Sets.newConcurrentHashSet();
@@ -190,14 +226,12 @@ public class ImportCli extends CommandLineInterface {
                 opts.numThreads = Math.min(opts.numThreads, files.size());
                 for (int i = 0; i < opts.numThreads; ++i) {
                     final Importer importer0 = Reflection.newInstance(
-                            constructor,
-                            i == 0 ? concourse : Concourse.connect(opts.host,
-                                    opts.port, opts.username, opts.password,
-                                    opts.environment));
+                            constructor, getConcourseConnection(i));
                     if(!opts.dynamic.isEmpty()) {
                         importer0.setParams(opts.dynamic);
                     }
-                    if(importer0 instanceof Headered && !opts.header.isEmpty()) {
+                    if(importer0 instanceof Headered
+                            && !opts.header.isEmpty()) {
                         ((Headered) importer0).parseHeader(opts.header);
                     }
                     runnables.add(new Runnable() {
@@ -237,7 +271,7 @@ public class ImportCli extends CommandLineInterface {
             }
             else {
                 Importer importer = Reflection.newInstance(constructor,
-                        concourse);
+                        getConcourseConnection(0));
                 if(!opts.dynamic.isEmpty()) {
                     importer.setParams(opts.dynamic);
                 }
@@ -254,10 +288,39 @@ public class ImportCli extends CommandLineInterface {
             if(options.verbose) {
                 System.out.println(records);
             }
-            System.out.println(MessageFormat.format("Imported data "
-                    + "into {0} records in {1} seconds", records.size(),
-                    seconds));
+            System.out.println(AnyStrings.format(
+                    "Imported data into {} record{} in {} seconds",
+                    records.size(), records.size() > 1 ? "s" : "", seconds));
+            if(dryRun) {
+                System.out.println(
+                        ((ImportDryRunConcourse) getConcourseConnection(0))
+                                .dump());
+            }
         }
+    }
+
+    @Override
+    protected Options getOptions() {
+        return new ImportOptions();
+    }
+
+    /**
+     * Return the host Concourse Server's "home" directory.
+     * 
+     * @return the host application's home
+     */
+    @Nullable
+    private static Path getConcourseServerHome() {
+        // NOTE: This is a HACK! This method is borrowed from Concourse Server's
+        // ManagementCli interface because we know that the provided ImportCli
+        // will likely live in a Concourse Deployment's standard directory from
+        // CLIs.
+        String path = System.getProperty("user.app.home"); // this is set by the
+                                                           // .env script that
+                                                           // is sourced by
+                                                           // every server-side
+                                                           // CLI
+        return path != null ? Paths.get(path) : null;
     }
 
     /**
@@ -281,8 +344,8 @@ public class ImportCli extends CommandLineInterface {
                 clz = getCustomImporterClass(type);
             }
             catch (ClassNotFoundException e) {
-                throw new RuntimeException(Strings.format(
-                        "{} is not a valid importer type.", type));
+                throw new RuntimeException(AnyStrings
+                        .format("{} is not a valid importer type.", type));
             }
         }
         try {
@@ -301,43 +364,119 @@ public class ImportCli extends CommandLineInterface {
      * importer that is not already defined in the {@link #importers built-in}
      * collection.
      * 
-     * @param alias a conventional alias (FileTypeImporter --> file-type) or a
-     *            fully qualified class name
+     * @param alias a conventional alias (i.e. FileTypeImporter --> file-type)
+     *            OR a fully qualified class name OR the path to a customer
+     *            importer file (can be .groovy or .jar) OR the name of a
+     *            customer importer file contained in the "importers" directory
+     *            of the server's home
      * @return the {@link Class} that corresponds to the custom importer
      * @throws ClassNotFoundException
      */
     @SuppressWarnings("unchecked")
-    private static Class<? extends Importer> getCustomImporterClass(String alias)
-            throws ClassNotFoundException {
+    private static Class<? extends Importer> getCustomImporterClass(
+            String alias) throws ClassNotFoundException {
         try {
             return (Class<? extends Importer>) Class.forName(alias);
         }
         catch (ClassNotFoundException e) {
-            // Attempt to determine the correct class name from the alias by
-            // loading the server's classpath. For the record, this is hella
-            // slow.
-            Reflections.log = null; // turn off reflection logging
-            Reflections reflections = new Reflections();
-            char firstChar = alias.charAt(0);
-            for (Class<? extends Importer> clazz : reflections
-                    .getSubTypesOf(Importer.class)) {
-                String name = clazz.getSimpleName();
-                if(name.length() == 0) { // Skip anonymous subclasses
-                    continue;
+            Path path;
+            boolean exists = true;
+            if(!(path = Paths.get(Files.expandPath(alias, LAUNCH_DIRECTORY)))
+                    .toFile().exists()) {
+                exists = false;
+                Path concourseServerHome = getConcourseServerHome();
+                if(concourseServerHome != null) {
+                    Path importers = getConcourseServerHome()
+                            .resolve("importers");
+                    String[] candidates = { alias, alias + ".groovy",
+                            alias + ".jar" };
+                    for (String candidate : candidates) {
+                        if((path = importers.resolve(candidate)).toFile()
+                                .exists()) {
+                            exists = true;
+                            break;
+                        }
+                    }
                 }
-                char nameFirstChar = name.charAt(0);
-                if(!Modifier.isAbstract(clazz.getModifiers())
-                        && (nameFirstChar == Character.toUpperCase(firstChar) || nameFirstChar == Character
-                                .toLowerCase(firstChar))) {
-                    String expected = CaseFormat.UPPER_CAMEL.to(
-                            CaseFormat.LOWER_HYPHEN, clazz.getSimpleName())
-                            .replaceAll("-importer", "");
-                    if(alias.equals(expected)) {
-                        return clazz;
+            }
+            if(exists) {
+                if(path.toString().endsWith(".groovy")) {
+                    return GroovyFiles.loadClass(path);
+                }
+                else if(path.toString().endsWith(".jar")) {
+                    URLClassLoader typeClassLoader = null;
+                    URLClassLoader serverClassLoader = null;
+                    try {
+                        URL[] urls = new URL[] {
+                                path.toFile().toURI().toURL() };
+                        typeClassLoader = new URLClassLoader(urls, null);
+                        serverClassLoader = new URLClassLoader(urls,
+                                Thread.currentThread().getContextClassLoader());
+                        ClassPath classpath = ClassPath.from(typeClassLoader);
+                        for (ClassInfo info : classpath.getAllClasses()) {
+                            String name = info.getName();
+                            Class<?> clazz = serverClassLoader.loadClass(name);
+                            if(Importer.class.isAssignableFrom((clazz))) {
+                                return (Class<? extends Importer>) clazz;
+                            }
+                        }
+                        throw e;
+                    }
+                    catch (IOException ioe) {
+                        throw CheckedExceptions.throwAsRuntimeException(ioe);
+                    }
+                    finally {
+                        for (URLClassLoader loader : ImmutableList
+                                .of(typeClassLoader, serverClassLoader)) {
+                            if(loader != null) {
+                                try {
+                                    loader.close();
+                                }
+                                catch (IOException ignore) {
+                                    throw CheckedExceptions
+                                            .throwAsRuntimeException(ignore);
+                                }
+                            }
+                        }
+                    }
+                }
+                else {
+                    throw new UnsupportedOperationException(AnyStrings.format(
+                            "{} is an unsupported file type for custom importers",
+                            path));
+                }
+            }
+            else {
+                // Attempt to determine the correct class name from the alias by
+                // loading the server's classpath. For the record, this is hella
+                // slow.
+                Reflections.log = null; // turn off reflection logging
+                Reflections reflections = new Reflections();
+                char firstChar = alias.charAt(0);
+                for (Class<? extends Importer> clazz : reflections
+                        .getSubTypesOf(Importer.class)) {
+                    String name = clazz.getSimpleName();
+                    if(name.length() == 0) { // Skip anonymous subclasses
+                        continue;
+                    }
+                    char nameFirstChar = name.charAt(0);
+                    if(!Modifier.isAbstract(clazz.getModifiers())
+                            && (nameFirstChar == Character
+                                    .toUpperCase(firstChar)
+                                    || nameFirstChar == Character
+                                            .toLowerCase(firstChar))) {
+                        String expected = CaseFormat.UPPER_CAMEL
+                                .to(CaseFormat.LOWER_HYPHEN,
+                                        clazz.getSimpleName())
+                                .replaceAll("-importer", "");
+                        if(alias.equals(expected)) {
+                            return clazz;
+                        }
                     }
                 }
             }
             throw e;
+
         }
     }
 
@@ -372,26 +511,55 @@ public class ImportCli extends CommandLineInterface {
     }
 
     /**
+     * Get the appropriate {@link Concourse} client based on the {@code ticket}
+     * and whether the import is actually a {@link #dryRun} or nah.
+     * 
+     * @param ticket
+     * @return a connection to {@link Concourse} that can be used for importing
+     *         data
+     */
+    private Concourse getConcourseConnection(int ticket) {
+        if(dryRun) {
+            return new ImportDryRunConcourse();
+        }
+        else if(ticket == 0) {
+            return concourse;
+        }
+        else {
+            return Concourse.copyExistingConnection(concourse);
+        }
+    }
+
+    /**
      * Import specific {@link Options}.
      * 
      * @author jnelson
      */
     protected static class ImportOptions extends Options {
 
-        @Parameter(names = { "-d", "--data" }, description = "The path to the file or directory to import; if no source is provided read from stdin")
+        @Parameter(names = { "-d",
+                "--data" }, description = "The path to the file or directory to import; if no source is provided read from stdin")
         public String data;
 
         @Parameter(names = "--numThreads", description = "The number of worker threads to use for a multithreaded import")
         public int numThreads = Runtime.getRuntime().availableProcessors();
 
-        @Parameter(names = { "-r", "--resolveKey" }, description = "The key to use when resolving data into existing records")
+        @Parameter(names = { "-r",
+                "--resolveKey" }, description = "The key to use when resolving data into existing records")
         public String resolveKey = null;
 
-        @Parameter(names = { "-t", "--type" }, description = "The name/type of the importer to use")
+        @Parameter(names = { "-t",
+                "--type" }, description = "The Importer to use; specified as either the name of a built-in importer or the path to a custom importer located on the filesystem")
         public String type = "csv";
 
         @Parameter(names = "--header", description = "A custom header to assign for supporting importers")
         public String header = "";
+
+        @Parameter(names = "--annotate-data-source", description = "Add the filename from which the data is imported as a value for the '__datasource' key on every imported object")
+        public boolean annotateDataSource = false;
+
+        @Parameter(names = "--dry-run", description = "Do a test import of the data in memory and print a JSON dump of what would be inserted into Concourse")
+        public boolean dryRun = false;
 
     }
 

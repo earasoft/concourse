@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -22,6 +22,7 @@ import java.lang.management.MemoryMXBean;
 import java.lang.management.MemoryUsage;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.ServerSocket;
 import java.net.SocketException;
@@ -33,11 +34,13 @@ import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.text.MessageFormat;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import javax.management.MBeanServerConnection;
 import javax.management.remote.JMXConnector;
@@ -46,6 +49,19 @@ import javax.management.remote.JMXServiceURL;
 
 import jline.TerminalFactory;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import ch.qos.logback.classic.Level;
+
+import com.cinchapi.ccl.grammar.Symbol;
+import com.cinchapi.common.base.AnyStrings;
+import com.cinchapi.common.base.ArrayBuilder;
+import com.cinchapi.common.base.CheckedExceptions;
+import com.cinchapi.common.process.Processes;
+import com.cinchapi.common.process.Processes.ProcessResult;
+import com.cinchapi.common.reflect.Reflection;
+import com.cinchapi.concourse.Calculator;
 import com.cinchapi.concourse.Concourse;
 import com.cinchapi.concourse.DuplicateEntryException;
 import com.cinchapi.concourse.Link;
@@ -53,21 +69,15 @@ import com.cinchapi.concourse.Timestamp;
 import com.cinchapi.concourse.config.ConcourseClientPreferences;
 import com.cinchapi.concourse.config.ConcourseServerPreferences;
 import com.cinchapi.concourse.lang.Criteria;
-import com.cinchapi.concourse.lang.Symbol;
+import com.cinchapi.concourse.lang.paginate.Page;
+import com.cinchapi.concourse.lang.sort.Order;
+import com.cinchapi.concourse.lang.sort.OrderComponent;
 import com.cinchapi.concourse.thrift.Diff;
 import com.cinchapi.concourse.thrift.Operator;
 import com.cinchapi.concourse.time.Time;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import ch.qos.logback.classic.Level;
-
 import com.cinchapi.concourse.util.ConcourseServerDownloader;
 import com.cinchapi.concourse.util.FileOps;
-import com.cinchapi.concourse.util.Processes;
 import com.google.common.base.Stopwatch;
-import com.google.common.base.Throwables;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
@@ -101,8 +111,8 @@ public class ManagedConcourseServer {
      * @return the ManagedConcourseServer
      */
     public static ManagedConcourseServer manageNewServer(File installer) {
-        return manageNewServer(installer, DEFAULT_INSTALL_HOME + File.separator
-                + Time.now());
+        return manageNewServer(installer,
+                DEFAULT_INSTALL_HOME + File.separator + Time.now());
     }
 
     /**
@@ -115,8 +125,8 @@ public class ManagedConcourseServer {
      */
     public static ManagedConcourseServer manageNewServer(File installer,
             String directory) {
-        return new ManagedConcourseServer(install(installer.getAbsolutePath(),
-                directory));
+        return new ManagedConcourseServer(
+                install(installer.getAbsolutePath(), directory));
     }
 
     /**
@@ -126,8 +136,8 @@ public class ManagedConcourseServer {
      * @return the ManagedConcourseServer
      */
     public static ManagedConcourseServer manageNewServer(String version) {
-        return manageNewServer(version, DEFAULT_INSTALL_HOME + File.separator
-                + Time.now());
+        return manageNewServer(version,
+                DEFAULT_INSTALL_HOME + File.separator + Time.now());
     }
 
     /**
@@ -153,8 +163,8 @@ public class ManagedConcourseServer {
      */
     private static void configure(String installDirectory) {
         ConcourseServerPreferences prefs = ConcourseServerPreferences
-                .open(installDirectory + File.separator + CONF + File.separator
-                        + "concourse.prefs");
+                .from(Paths.get(installDirectory + File.separator + CONF
+                        + File.separator + "concourse.prefs"));
         String data = installDirectory + File.separator + "data";
         prefs.setBufferDirectory(data + File.separator + "buffer");
         prefs.setDatabaseDirectory(data + File.separator + "database");
@@ -199,7 +209,7 @@ public class ManagedConcourseServer {
             }
         }
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 
@@ -211,7 +221,7 @@ public class ManagedConcourseServer {
     private static int getOpenPort() {
         int min = 49512;
         int max = 65535;
-        int port = RAND.nextInt(min) + (max - min);
+        int port = min + RAND.nextInt(max - min);
         return isPortAvailable(port) ? port : getOpenPort();
     }
 
@@ -225,54 +235,66 @@ public class ManagedConcourseServer {
     private static String install(String installer, String directory) {
         try {
             Files.createDirectories(Paths.get(directory));
-            Path binary = Paths.get(directory + File.separator
-                    + TARGET_BINARY_NAME);
+            Path binary = Paths
+                    .get(directory + File.separator + TARGET_BINARY_NAME);
             Files.deleteIfExists(binary);
             Files.copy(Paths.get(installer), binary);
-            ProcessBuilder builder = new ProcessBuilder(Lists.newArrayList(
-                    "sh", binary.toString()));
+            ProcessBuilder builder = new ProcessBuilder(Lists.newArrayList("sh",
+                    binary.toString(), "--", "skip-integration"));
             builder.directory(new File(directory));
             builder.redirectErrorStream();
-            Process process = builder.start();
-            // The concourse-server installer prompts for an admin password in
-            // order to make optional system wide In order to get around this
-            // prompt, we have to "kill" the process, otherwise the server
-            // install will hang.
+            AtomicBoolean terminated = new AtomicBoolean(false);
+            Process proc1 = builder.start();
             Stopwatch watch = Stopwatch.createStarted();
-            while (watch.elapsed(TimeUnit.SECONDS) < 1) {
-                continue;
-            }
-            watch.stop();
-            process.destroy();
+            new Thread(() -> {
+                // The concourse-server installer prompts for an admin password
+                // in order to complete optional system wide integration.
+                // Concourse versions >= 0.5.0 have a skip-integration flag that
+                // skips the prompt. Since older versions don't support the
+                // prompt, we have to "kill" the process, otherwise the server
+                // install will hang.
+                while (!terminated.get()) {
+                    if(watch.elapsed(TimeUnit.SECONDS) > 10) {
+                        proc1.destroy();
+                        watch.stop();
+                    }
+                    else {
+                        log.debug("Waiting for server install to finish...");
+                        try {
+                            Thread.sleep(1000);
+                        }
+                        catch (InterruptedException e) {}
+                        continue;
+                    }
+                }
+            }).start();
+            proc1.waitFor();
+            terminated.set(true);
             TerminalFactory.get().restore();
             String application = directory + File.separator
                     + "concourse-server"; // the install directory for the
                                           // concourse-server application
-            process = Runtime.getRuntime().exec("ls " + application);
-            List<String> output = Processes.getStdOut(process);
+            Process proc2 = Runtime.getRuntime().exec("ls " + application);
+            List<String> output = Processes.getStdOut(proc2);
             if(!output.isEmpty()) {
-                Files.deleteIfExists(Paths.get(application,
-                        "conf/concourse.prefs.dev")); // delete the dev prefs
-                                                      // because those would
-                                                      // take precedence over
-                                                      // what is configured
-                                                      // in this class
+                // delete the dev prefs because those would take precedence over
+                // what is configured in this class
+                Files.deleteIfExists(
+                        Paths.get(application, "conf/concourse.prefs.dev"));
                 configure(application);
                 log.info("Successfully installed server in {}", application);
                 return application;
             }
             else {
-                throw new RuntimeException(
-                        MessageFormat
-                                .format("Unsuccesful attempt to "
-                                        + "install server at {0} "
-                                        + "using binary from {1}", directory,
-                                        installer));
+                throw new RuntimeException(MessageFormat.format(
+                        "Unsuccesful attempt to " + "install server at {0} "
+                                + "using binary from {1}",
+                        directory, installer));
             }
 
         }
         catch (Exception e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
 
     }
@@ -293,7 +315,7 @@ public class ManagedConcourseServer {
             return false;
         }
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 
@@ -308,6 +330,7 @@ public class ManagedConcourseServer {
      */
     private static final String DEFAULT_INSTALL_HOME = System
             .getProperty("user.home") + File.separator + ".concourse-testing";
+
     // ---logger
     private static final Logger log = LoggerFactory
             .getLogger(ManagedConcourseServer.class);
@@ -328,6 +351,12 @@ public class ManagedConcourseServer {
      * {@link #syncDefaultClientConnectionInfo()} was called by the client.
      */
     private ClientPrefsCleanupAction clientPrefsCleanupAction = ClientPrefsCleanupAction.NONE;
+
+    /**
+     * The file whose existence determines whether or not this server should be
+     * destroyed on exit.
+     */
+    private final Path destroyOnExitFlag;
 
     /**
      * The server application install directory;
@@ -352,13 +381,19 @@ public class ManagedConcourseServer {
      */
     private ManagedConcourseServer(String installDirectory) {
         this.installDirectory = installDirectory;
-        this.prefs = ConcourseServerPreferences.open(installDirectory
-                + File.separator + CONF + File.separator + "concourse.prefs");
+        this.prefs = ConcourseServerPreferences.from(Paths.get(installDirectory
+                + File.separator + CONF + File.separator + "concourse.prefs"));
+        prefs.setLogLevel(Level.DEBUG);
+        this.destroyOnExitFlag = Paths.get(installDirectory)
+                .resolve(".destroyOnExit");
+        destroyOnExit(true);
         Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
 
             @Override
             public void run() {
-                destroy();
+                if(destroyOnExit()) {
+                    destroy();
+                }
             }
 
         }));
@@ -384,6 +419,11 @@ public class ManagedConcourseServer {
      */
     public Concourse connect(String username, String password) {
         return new Client(username, password);
+    }
+
+    public Concourse connect(String username, String password,
+            String environment) {
+        return new Client(username, password, environment);
     }
 
     /**
@@ -412,16 +452,93 @@ public class ManagedConcourseServer {
                     Files.delete(prefs);
                     log.info("Deleted client prefs from {}", prefs);
                 }
-                deleteDirectory(Paths.get(installDirectory).getParent()
-                        .toString());
+                deleteDirectory(
+                        Paths.get(installDirectory).getParent().toString());
                 log.info("Deleted server install directory at {}",
                         installDirectory);
             }
             catch (Exception e) {
-                throw Throwables.propagate(e);
+                throw CheckedExceptions.wrapAsRuntimeException(e);
             }
         }
 
+    }
+
+    /**
+     * Return {@code true} if this server should be destroyed when the JVM
+     * exits.
+     * 
+     * @return whether the server should be destroyed or not when the JVM exits
+     */
+    public synchronized boolean destroyOnExit() {
+        return Files.exists(destroyOnExitFlag);
+    }
+
+    /**
+     * Set a flag that determines whether this instance will be destroyed on
+     * exit.
+     * 
+     * @param destroyOnExit
+     */
+    public synchronized void destroyOnExit(boolean destroyOnExit) {
+        try {
+            if(destroyOnExit) {
+                Files.write(destroyOnExitFlag, new byte[] { 1 });
+            }
+            else {
+                Files.deleteIfExists(destroyOnExitFlag);
+            }
+        }
+        catch (IOException e) {
+            throw CheckedExceptions.throwAsRuntimeException(e);
+        }
+    }
+
+    /**
+     * Execute the specified {@code cli} with the provided {@code args}.
+     * <p>
+     * This is the equivalent of calling {@code concourse <cli> <args>}
+     * on the command line
+     * </p>
+     * 
+     * @param cli the name of the CLI to execute
+     * @param args the args to pass to the cli
+     * @return the standard output from executing the cli
+     */
+    public List<String> executeCli(String cli, String... args) {
+        try {
+            ArrayBuilder<String> args0 = ArrayBuilder.builder();
+            args0.add("./concourse");
+            args0.add(cli);
+            for (String arg : args) {
+                args0.add(arg.split("\\s"));
+            }
+            Process process = new ProcessBuilder(args0.build())
+                    .directory(
+                            new File(installDirectory + File.separator + BIN))
+                    .start();
+            ProcessResult result = Processes.waitFor(process);
+            if(result.exitCode() == 0) {
+                return result.out();
+            }
+            else {
+                log.warn("An error occurred executing '{}': {}", cli,
+                        result.err());
+                return result.err();
+            }
+        }
+        catch (IOException e) {
+            throw CheckedExceptions.wrapAsRuntimeException(e);
+        }
+    }
+
+    /**
+     * Return the directory where the server stores buffer files.
+     * 
+     * @return the buffer directory
+     */
+    public Path getBufferDirectory() {
+        return Paths.get(prefs.getBufferDirectory());
     }
 
     /**
@@ -431,6 +548,15 @@ public class ManagedConcourseServer {
      */
     public int getClientPort() {
         return prefs.getClientPort();
+    }
+
+    /**
+     * Return the directory where the server stores database files.
+     * 
+     * @return the database directory
+     */
+    public Path getDatabaseDirectory() {
+        return Paths.get(prefs.getDatabaseDirectory());
     }
 
     /**
@@ -447,7 +573,7 @@ public class ManagedConcourseServer {
             return memory.getHeapMemoryUsage();
         }
         catch (Exception e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 
@@ -476,7 +602,7 @@ public class ManagedConcourseServer {
                 mBeanServerConnection = connector.getMBeanServerConnection();
             }
             catch (Exception e) {
-                throw Throwables.propagate(e);
+                throw CheckedExceptions.wrapAsRuntimeException(e);
             }
         }
         return mBeanServerConnection;
@@ -496,8 +622,58 @@ public class ManagedConcourseServer {
             return memory.getNonHeapMemoryUsage();
         }
         catch (Exception e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
+    }
+
+    /**
+     * Return {@code true} if the default environment has writes that in its
+     * buffer that are transportable to its database.
+     * 
+     * @return {@code true} if there are writes to transport in the default
+     *         environment
+     */
+    public boolean hasWritesToTransport() {
+        return hasWritesToTransport(prefs.getDefaultEnvironment());
+    }
+
+    /**
+     * Return {@code true} if the {@code environment} has writes that in its
+     * buffer that are transportable to its database.
+     * 
+     * @return {@code true} if there are writes to transport in the
+     *         {@code environment}
+     */
+    public boolean hasWritesToTransport(String environment) {
+        Path path = getBufferDirectory().resolve(environment);
+        try {
+            return Files.list(path).filter(p -> p.toString().endsWith(".buf"))
+                    .count() > 1;
+        }
+        catch (IOException e) {
+            throw CheckedExceptions.wrapAsRuntimeException(e);
+        }
+    }
+
+    /**
+     * Install the plugin(s) contained in the {@code bundle} on this
+     * {@link ManagedConcourseServer}.
+     * 
+     * @param bundle the path to the plugin bundle
+     * @return {@code true} if the plugin(s) from the bundle is/are installed
+     */
+    public boolean installPlugin(Path bundle) {
+        log.info("Attempting to install plugins from {}", bundle);
+        List<String> out = executeCli("plugin", "install", bundle.toString(),
+                "--username admin", "--password admin");
+        for (String line : out) {
+            if(line.contains("Successfully installed")) {
+                return true;
+            }
+        }
+        throw new RuntimeException(AnyStrings
+                .format("Unable to install plugin '{}': {}", bundle, out));
+
     }
 
     /**
@@ -506,8 +682,38 @@ public class ManagedConcourseServer {
      * @return {@code true} if the server is running
      */
     public boolean isRunning() {
-        return Iterables.get(execute("concourse", "status"), 0).contains(
-                "is running");
+        return Iterables.get(execute("concourse", "status"), 0)
+                .contains("is running");
+    }
+
+    /**
+     * Return the {@link ManagedConcourseServer server's}
+     * {@link ConourseServerPreferences preferences}.
+     * 
+     * @return the {@link ConourseServerPreferences preferences}.
+     */
+    public ConcourseServerPreferences prefs() {
+        return prefs;
+    }
+
+    /**
+     * Print the content of the log file with {@code name} to the console.
+     * 
+     * @param name the name of the log file (i.e. console)
+     */
+    public void printLog(String name) {
+        // NOTE: This method does not currently print contents of archived log
+        // files. This is intentional because we assume that any interesting log
+        // information that needs to be printed will be in the most recent file.
+        String logdir = Paths.get(installDirectory, "log").toString();
+        String file = Paths.get(logdir, name + ".log").toString();
+        String content = FileOps.read(file);
+        System.err.println(file);
+        for (int i = 0; i < file.length(); ++i) {
+            System.err.print('-');
+        }
+        System.err.println();
+        System.err.println(content);
     }
 
     /**
@@ -524,27 +730,6 @@ public class ManagedConcourseServer {
     }
 
     /**
-     * Print the content of the log file with {@code name} to the console.
-     * 
-     * @param name the name of the log file (i.e. console)
-     */
-    public void printLog(String name) {
-        // NOTE: This method does not currently print contents of archived log
-        // files. This is intentional because we assume that any interesting log
-        // information that needs to be printed will be in the most recent file.
-        String logdir = Paths.get(installDirectory, "log").toString();
-        String file = Paths.get(logdir, name + ".log").toString();
-        String content = FileOps.read(file);
-        System.out.println(file);
-        for (int i = 0; i < file.length(); ++i) {
-            System.out.print('-');
-        }
-        System.out.println();
-        System.out.println(content);
-
-    }
-
-    /**
      * Start the server.
      */
     public void start() {
@@ -554,7 +739,7 @@ public class ManagedConcourseServer {
             }
         }
         catch (Exception e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
 
     }
@@ -569,7 +754,7 @@ public class ManagedConcourseServer {
             }
         }
         catch (Exception e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
 
     }
@@ -608,16 +793,18 @@ public class ManagedConcourseServer {
             else {
                 clientPrefsCleanupAction = ClientPrefsCleanupAction.DELETE;
             }
-            log.info("Synchronizing the managed server's connection "
-                    + "information to the client prefs file at {}", prefs);
+            log.info(
+                    "Synchronizing the managed server's connection "
+                            + "information to the client prefs file at {}",
+                    prefs);
             ConcourseClientPreferences ccp = ConcourseClientPreferences
-                    .open(FileOps.touch(prefs.toString()));
+                    .from(Paths.get(FileOps.touch(prefs.toString())));
             ccp.setPort(getClientPort());
             ccp.setUsername("admin");
             ccp.setPassword("admin".toCharArray());
         }
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 
@@ -640,7 +827,7 @@ public class ManagedConcourseServer {
             dir.delete();
         }
         catch (Exception e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 
@@ -653,17 +840,35 @@ public class ManagedConcourseServer {
      */
     private List<String> execute(String cli, String... args) {
         try {
-            String command = "sh " + cli;
+            String command = "bash " + cli;
             for (String arg : args) {
                 command += " " + arg;
             }
             Process process = Runtime.getRuntime().exec(command, null,
                     new File(installDirectory + File.separator + BIN));
-            return Processes.getStdOut(process);
+            process.waitFor();
+            if(process.exitValue() == 0) {
+                return Processes.getStdOut(process);
+            }
+            else {
+                log.warn("An error occurred executing '{}': {}", command,
+                        Processes.getStdErr(process));
+                return Collections.emptyList();
+            }
         }
         catch (Exception e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
+    }
+
+    /**
+     * Enum for log levels that can be passed to the
+     * {@link #printLogs(LogLevel...)} method
+     * 
+     * @author Jeff Nelson
+     */
+    public enum LogLevel {
+        CONSOLE, DEBUG, ERROR, INFO, WARN
     }
 
     /**
@@ -687,15 +892,6 @@ public class ManagedConcourseServer {
          * @return the result
          */
         public abstract <T> T call(String methodName, Object... args);
-    }
-
-    /**
-     * The valid options for the {@link #clientPrefsCleanupAction} variable.
-     * 
-     * @author Jeff Nelson
-     */
-    enum ClientPrefsCleanupAction {
-        DELETE, NONE, RESTORE_BACKUP
     }
 
     /**
@@ -724,26 +920,80 @@ public class ManagedConcourseServer {
          * @throws Exception
          */
         public Client(String username, String password) {
-            try {
-                this.loader = new URLClassLoader(
-                        gatherJars(getInstallDirectory()), null);
+            this(username, password, "");
+        }
+
+        /**
+         * Construct a new instance.
+         * 
+         * @param username
+         * @param password
+         * @param environment
+         */
+        public Client(String username, String password, String environment) {
+            this(username, password, environment, 5);
+        }
+
+        /**
+         * Construct a new instance.
+         * 
+         * @param username
+         * @param password
+         * @param retries
+         */
+        private Client(String username, String password, String environment,
+                int retries) {
+            Object delegate = null;
+            while (retries > 0 && delegate == null) {
+                --retries;
                 try {
-                    clazz = loader.loadClass(packageBase + "Concourse");
+                    this.loader = new URLClassLoader(
+                            gatherJars(getInstallDirectory()), null);
+                    try {
+                        clazz = loader.loadClass(packageBase + "Concourse");
+                    }
+                    catch (ClassNotFoundException e) {
+                        // Prior to version 0.5.0, Concourse classes were
+                        // located in the "org.cinchapi.concourse" package, so
+                        // we attempt to use that if the default does not work.
+                        packageBase = "org.cinchapi.concourse.";
+                        clazz = loader.loadClass(packageBase + "Concourse");
+                    }
+                    delegate = clazz
+                            .getMethod("connect", String.class, int.class,
+                                    String.class, String.class, String.class)
+                            .invoke(null, "localhost", getClientPort(),
+                                    username, password, environment);
                 }
-                catch (ClassNotFoundException e) {
-                    // Prior to version 0.5.0, Concourse classes were located in
-                    // the "org.cinchapi.concourse" package, so we attempt to
-                    // use that if the default does not work.
-                    packageBase = "org.cinchapi.concourse.";
-                    clazz = loader.loadClass(packageBase + "Concourse");
+                catch (InvocationTargetException e) {
+                    Throwable target = e.getTargetException();
+                    if(target.getMessage().contains(
+                            "Could not connect to the Concourse Server")) {
+                        // There is a race condition where the CLI reports the
+                        // server has started (because the process has
+                        // registered a PID) but the thrift server hasn't been
+                        // opened to accept connections yet. This logic tries to
+                        // get around that by retrying the connection a handful
+                        // of times before failing.
+                        try {
+                            Thread.sleep(5000);
+                            continue;
+                        }
+                        catch (InterruptedException t) {/* ignore */}
+                    }
+                    else {
+                        throw CheckedExceptions.throwAsRuntimeException(e);
+                    }
                 }
-                this.delegate = clazz.getMethod("connect", String.class,
-                        int.class, String.class, String.class).invoke(null,
-                        "localhost", getClientPort(), username, password);
+                catch (Exception e) {
+                    throw CheckedExceptions.throwAsRuntimeException(e);
+                }
             }
-            catch (Exception e) {
-                throw Throwables.propagate(e);
+            if(delegate == null) {
+                throw new RuntimeException(
+                        "Could not connect to server before timeout...");
             }
+            this.delegate = delegate;
         }
 
         @Override
@@ -765,45 +1015,8 @@ public class ManagedConcourseServer {
 
         @Override
         public <T> boolean add(String key, T value, long record) {
-            return invoke("add", String.class, Object.class, long.class).with(
-                    key, value, record);
-        }
-
-        @Override
-        public Map<Timestamp, String> audit(long record) {
-            return invoke("audit", long.class).with(record);
-        }
-
-        @Override
-        public Map<Timestamp, String> audit(long record, Timestamp start) {
-            return invoke("audit", long.class, Timestamp.class).with(record,
-                    start);
-        }
-
-        @Override
-        public Map<Timestamp, String> audit(long record, Timestamp start,
-                Timestamp end) {
-            return invoke("audit", long.class, Timestamp.class, Timestamp.class)
-                    .with(start, end);
-        }
-
-        @Override
-        public Map<Timestamp, String> audit(String key, long record) {
-            return invoke("audit", String.class, long.class).with(key, record);
-        }
-
-        @Override
-        public Map<Timestamp, String> audit(String key, long record,
-                Timestamp start) {
-            return invoke("audit", String.class, long.class, Timestamp.class)
-                    .with(key, record, start);
-        }
-
-        @Override
-        public Map<Timestamp, String> audit(String key, long record,
-                Timestamp start, Timestamp end) {
-            return invoke("audit", String.class, long.class, Timestamp.class,
-                    Timestamp.class).with(key, record, start, end);
+            return invoke("add", String.class, Object.class, long.class)
+                    .with(key, value, record);
         }
 
         @Override
@@ -815,8 +1028,8 @@ public class ManagedConcourseServer {
         @Override
         public Map<String, Map<Object, Set<Long>>> browse(
                 Collection<String> keys, Timestamp timestamp) {
-            return invoke("browse", Collection.class, Timestamp.class).with(
-                    keys, timestamp);
+            return invoke("browse", Collection.class, Timestamp.class)
+                    .with(keys, timestamp);
         }
 
         @Override
@@ -831,6 +1044,16 @@ public class ManagedConcourseServer {
         }
 
         @Override
+        public final Calculator calculate() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public final Calculator calculate(String method, Object... args) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
         public <T> T call(String methodName, Object... args) {
             Class<?>[] classes = new Class<?>[args.length];
             for (int i = 0; i < classes.length; ++i) {
@@ -840,24 +1063,25 @@ public class ManagedConcourseServer {
         }
 
         @Override
-        public Map<Timestamp, Set<Object>> chronologize(String key, long record) {
+        public <T> Map<Timestamp, Set<T>> chronologize(String key,
+                long record) {
             return invoke("chronologize", String.class, long.class).with(key,
                     record);
         }
 
         @Override
-        public Map<Timestamp, Set<Object>> chronologize(String key,
-                long record, Timestamp start) {
+        public <T> Map<Timestamp, Set<T>> chronologize(String key, long record,
+                Timestamp start) {
             return invoke("chronologize", String.class, long.class,
                     Timestamp.class).with(key, record, start);
         }
 
         @Override
-        public Map<Timestamp, Set<Object>> chronologize(String key,
-                long record, Timestamp start, Timestamp end) {
+        public <T> Map<Timestamp, Set<T>> chronologize(String key, long record,
+                Timestamp start, Timestamp end) {
             return invoke("chronologize", String.class, long.class,
                     Timestamp.class, Timestamp.class).with(key, record, start,
-                    end);
+                            end);
         }
 
         @Override
@@ -899,6 +1123,17 @@ public class ManagedConcourseServer {
         }
 
         @Override
+        public boolean consolidate(long first, long second, long... remaining) {
+            return invoke("consolidate", long.class, long.class, long[].class)
+                    .with(first, second, remaining);
+        }
+
+        @Override
+        public Set<String> describe() {
+            return invoke("describe").with();
+        }
+
+        @Override
         public Map<Long, Set<String>> describe(Collection<Long> records) {
             return invoke("describe", Collection.class).with(records);
         }
@@ -906,8 +1141,8 @@ public class ManagedConcourseServer {
         @Override
         public Map<Long, Set<String>> describe(Collection<Long> records,
                 Timestamp timestamp) {
-            return invoke("describe", Collection.class, Timestamp.class).with(
-                    records, timestamp);
+            return invoke("describe", Collection.class, Timestamp.class)
+                    .with(records, timestamp);
         }
 
         @Override
@@ -919,6 +1154,11 @@ public class ManagedConcourseServer {
         public Set<String> describe(long record, Timestamp timestamp) {
             return invoke("describe", long.class, Timestamp.class).with(record,
                     timestamp);
+        }
+
+        @Override
+        public Set<String> describe(Timestamp timestamp) {
+            return invoke("describe", Timestamp.class).with(timestamp);
         }
 
         @Override
@@ -950,7 +1190,8 @@ public class ManagedConcourseServer {
         }
 
         @Override
-        public <T> Map<T, Map<Diff, Set<Long>>> diff(String key, Timestamp start) {
+        public <T> Map<T, Map<Diff, Set<Long>>> diff(String key,
+                Timestamp start) {
             return invoke("diff", String.class, Timestamp.class).with(key,
                     start);
         }
@@ -973,8 +1214,21 @@ public class ManagedConcourseServer {
         }
 
         @Override
-        public Set<Long> find(Object criteria) {
-            return invoke("find", Object.class).with(criteria);
+        public Set<Long> find(Criteria criteria, Order order) {
+            return invoke("find", Criteria.class, Order.class).with(criteria,
+                    order);
+        }
+
+        @Override
+        public Set<Long> find(Criteria criteria, Order order, Page page) {
+            return invoke("find", Criteria.class, Order.class, Page.class)
+                    .with(criteria, order, page);
+        }
+
+        @Override
+        public Set<Long> find(Criteria criteria, Page page) {
+            return invoke("find", Criteria.class, Page.class).with(criteria,
+                    page);
         }
 
         @Override
@@ -988,9 +1242,50 @@ public class ManagedConcourseServer {
         }
 
         @Override
+        public Set<Long> find(String key, Object value, Order order) {
+            return invoke("find", String.class, Object.class, Order.class)
+                    .with(key, value, order);
+        }
+
+        @Override
+        public Set<Long> find(String key, Object value, Order order,
+                Page page) {
+            return invoke("find", String.class, Object.class, Order.class,
+                    Page.class).with(key, value, order, page);
+        }
+
+        @Override
+        public Set<Long> find(String key, Object value, Page page) {
+            return invoke("find", String.class, Object.class, Page.class)
+                    .with(key, value, page);
+        }
+
+        @Override
         public Set<Long> find(String key, Object value, Timestamp timestamp) {
             return invoke("find", String.class, Object.class, Timestamp.class)
                     .with(key, value, timestamp);
+        }
+
+        @Override
+        public Set<Long> find(String key, Object value, Timestamp timestamp,
+                Order order) {
+            return invoke("find", String.class, Object.class, Timestamp.class,
+                    Order.class).with(key, value, timestamp, order);
+        }
+
+        @Override
+        public Set<Long> find(String key, Object value, Timestamp timestamp,
+                Order order, Page page) {
+            return invoke("find", String.class, Object.class, Timestamp.class,
+                    Order.class, Page.class).with(key, value, timestamp, order,
+                            page);
+        }
+
+        @Override
+        public Set<Long> find(String key, Object value, Timestamp timestamp,
+                Page page) {
+            return invoke("find", String.class, Object.class, Timestamp.class,
+                    Page.class).with(key, value, timestamp, page);
         }
 
         @Override
@@ -1008,10 +1303,81 @@ public class ManagedConcourseServer {
 
         @Override
         public Set<Long> find(String key, Operator operator, Object value,
+                Object value2, Order order) {
+            return invoke("find", String.class, Operator.class, Object.class,
+                    Object.class, Order.class).with(key, operator, value,
+                            value2, order);
+        }
+
+        @Override
+        public Set<Long> find(String key, Operator operator, Object value,
+                Object value2, Order order, Page page) {
+            return invoke("find", String.class, Operator.class, Object.class,
+                    Object.class, Order.class, Page.class).with(key, operator,
+                            value, value2, order, page);
+        }
+
+        @Override
+        public Set<Long> find(String key, Operator operator, Object value,
+                Object value2, Page page) {
+            return invoke("find", String.class, Operator.class, Object.class,
+                    Object.class, Page.class).with(key, operator, value, value2,
+                            page);
+        }
+
+        @Override
+        public Set<Long> find(String key, Operator operator, Object value,
                 Object value2, Timestamp timestamp) {
             return invoke("find", String.class, Operator.class, Object.class,
                     Object.class, Timestamp.class).with(key, operator, value,
-                    value2);
+                            value2);
+        }
+
+        @Override
+        public Set<Long> find(String key, Operator operator, Object value,
+                Object value2, Timestamp timestamp, Order order) {
+            return invoke("find", String.class, Operator.class, Object.class,
+                    Object.class, Timestamp.class, Order.class).with(key,
+                            operator, value, value2, timestamp, order);
+        }
+
+        @Override
+        public Set<Long> find(String key, Operator operator, Object value,
+                Object value2, Timestamp timestamp, Order order, Page page) {
+            return invoke("find", String.class, Operator.class, Object.class,
+                    Object.class, Timestamp.class, Order.class, Page.class)
+                            .with(key, operator, value, value2, timestamp,
+                                    order, page);
+        }
+
+        @Override
+        public Set<Long> find(String key, Operator operator, Object value,
+                Object value2, Timestamp timestamp, Page page) {
+            return invoke("find", String.class, Operator.class, Object.class,
+                    Object.class, Timestamp.class, Page.class).with(key,
+                            operator, value, value2, page);
+        }
+
+        @Override
+        public Set<Long> find(String key, Operator operator, Object value,
+                Order order) {
+            return invoke("find", String.class, Operator.class, Object.class,
+                    Order.class).with(key, operator, value, order);
+        }
+
+        @Override
+        public Set<Long> find(String key, Operator operator, Object value,
+                Order order, Page page) {
+            return invoke("find", String.class, Operator.class, Object.class,
+                    Order.class, Page.class).with(key, operator, value, order,
+                            page);
+        }
+
+        @Override
+        public Set<Long> find(String key, Operator operator, Object value,
+                Page page) {
+            return invoke("find", String.class, Operator.class, Object.class,
+                    Page.class).with(key, operator, value, page);
         }
 
         @Override
@@ -1019,6 +1385,46 @@ public class ManagedConcourseServer {
                 Timestamp timestamp) {
             return invoke("find", String.class, Operator.class, Object.class,
                     Timestamp.class).with(key, operator, value, timestamp);
+        }
+
+        @Override
+        public Set<Long> find(String key, Operator operator, Object value,
+                Timestamp timestamp, Order order) {
+            return invoke("find", String.class, Operator.class, Object.class,
+                    Timestamp.class, Order.class).with(key, operator, value,
+                            timestamp, order);
+        }
+
+        @Override
+        public Set<Long> find(String key, Operator operator, Object value,
+                Timestamp timestamp, Order order, Page page) {
+            return invoke("find", String.class, Operator.class, Object.class,
+                    Timestamp.class, Order.class, Page.class).with(key,
+                            operator, value, timestamp, order, page);
+        }
+
+        @Override
+        public Set<Long> find(String key, Operator operator, Object value,
+                Timestamp timestamp, Page page) {
+            return invoke("find", String.class, Operator.class, Object.class,
+                    Timestamp.class, Page.class).with(key, operator, value,
+                            timestamp, page);
+        }
+
+        @Override
+        public Set<Long> find(String ccl, Order order) {
+            return invoke("find", String.class, Order.class).with(ccl, order);
+        }
+
+        @Override
+        public Set<Long> find(String ccl, Order order, Page page) {
+            return invoke("find", String.class, Order.class, Page.class)
+                    .with(ccl, order, page);
+        }
+
+        @Override
+        public Set<Long> find(String ccl, Page page) {
+            return invoke("find", String.class, Page.class).with(ccl, page);
         }
 
         @Override
@@ -1036,10 +1442,81 @@ public class ManagedConcourseServer {
 
         @Override
         public Set<Long> find(String key, String operator, Object value,
+                Object value2, Order order) {
+            return invoke("find", String.class, String.class, Object.class,
+                    Object.class, Order.class).with(key, operator, value,
+                            value2, order);
+        }
+
+        @Override
+        public Set<Long> find(String key, String operator, Object value,
+                Object value2, Order order, Page page) {
+            return invoke("find", String.class, String.class, Object.class,
+                    Object.class, Order.class, Page.class).with(key, operator,
+                            value, value2, order, page);
+        }
+
+        @Override
+        public Set<Long> find(String key, String operator, Object value,
+                Object value2, Page page) {
+            return invoke("find", String.class, String.class, Object.class,
+                    Object.class, Page.class).with(key, operator, value, value2,
+                            page);
+        }
+
+        @Override
+        public Set<Long> find(String key, String operator, Object value,
                 Object value2, Timestamp timestamp) {
             return invoke("find", String.class, String.class, Object.class,
                     Object.class, Timestamp.class).with(key, operator, value,
-                    value2, timestamp);
+                            value2, timestamp);
+        }
+
+        @Override
+        public Set<Long> find(String key, String operator, Object value,
+                Object value2, Timestamp timestamp, Order order) {
+            return invoke("find", String.class, String.class, Object.class,
+                    Object.class, Timestamp.class, Order.class).with(key,
+                            operator, value, value2, timestamp, order);
+        }
+
+        @Override
+        public Set<Long> find(String key, String operator, Object value,
+                Object value2, Timestamp timestamp, Order order, Page page) {
+            return invoke("find", String.class, String.class, Object.class,
+                    Object.class, Timestamp.class, Order.class, Page.class)
+                            .with(key, operator, value, value2, timestamp,
+                                    order, page);
+        }
+
+        @Override
+        public Set<Long> find(String key, String operator, Object value,
+                Object value2, Timestamp timestamp, Page page) {
+            return invoke("find", String.class, String.class, Object.class,
+                    Object.class, Timestamp.class, Page.class).with(key,
+                            operator, value, value2, timestamp, page);
+        }
+
+        @Override
+        public Set<Long> find(String key, String operator, Object value,
+                Order order) {
+            return invoke("find", String.class, String.class, Object.class,
+                    Order.class).with(key, operator, value, order);
+        }
+
+        @Override
+        public Set<Long> find(String key, String operator, Object value,
+                Order order, Page page) {
+            return invoke("find", String.class, String.class, Object.class,
+                    Order.class, Page.class).with(key, operator, value, order,
+                            page);
+        }
+
+        @Override
+        public Set<Long> find(String key, String operator, Object value,
+                Page page) {
+            return invoke("find", String.class, String.class, Object.class,
+                    Page.class).with(key, operator, value, page);
         }
 
         @Override
@@ -1047,6 +1524,30 @@ public class ManagedConcourseServer {
                 Timestamp timestamp) {
             return invoke("find", String.class, String.class, Object.class,
                     Timestamp.class).with(key, operator, value, timestamp);
+        }
+
+        @Override
+        public Set<Long> find(String key, String operator, Object value,
+                Timestamp timestamp, Order order) {
+            return invoke("find", String.class, String.class, Object.class,
+                    Timestamp.class, Order.class).with(key, operator, value,
+                            timestamp, order);
+        }
+
+        @Override
+        public Set<Long> find(String key, String operator, Object value,
+                Timestamp timestamp, Order order, Page page) {
+            return invoke("find", String.class, String.class, Object.class,
+                    Timestamp.class, Order.class, Page.class).with(key,
+                            operator, value, timestamp, order, page);
+        }
+
+        @Override
+        public Set<Long> find(String key, String operator, Object value,
+                Timestamp timestamp, Page page) {
+            return invoke("find", String.class, String.class, Object.class,
+                    Timestamp.class, Page.class).with(key, operator, value,
+                            timestamp, page);
         }
 
         @Override
@@ -1059,8 +1560,8 @@ public class ManagedConcourseServer {
         @Override
         public long findOrInsert(Criteria criteria, String json)
                 throws DuplicateEntryException {
-            return invoke("findOrInsert", Criteria.class, String.class).with(
-                    criteria, json);
+            return invoke("findOrInsert", Criteria.class, String.class)
+                    .with(criteria, json);
         }
 
         @Override
@@ -1079,9 +1580,55 @@ public class ManagedConcourseServer {
 
         @Override
         public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
+                Collection<Long> records, Order order) {
+            return invoke("get", Collection.class, Collection.class,
+                    Order.class).with(keys, records, order);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
+                Collection<Long> records, Order order, Page page) {
+            return invoke("get", Collection.class, Collection.class,
+                    Order.class, Page.class).with(keys, records, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
+                Collection<Long> records, Page page) {
+            return invoke("get", Collection.class, Collection.class, Page.class)
+                    .with(keys, records, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
                 Collection<Long> records, Timestamp timestamp) {
             return invoke("get", Collection.class, Collection.class,
                     Timestamp.class).with(keys, records, timestamp);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
+                Collection<Long> records, Timestamp timestamp, Order order) {
+            return invoke("get", Collection.class, Collection.class,
+                    Timestamp.class, Order.class).with(keys, records, timestamp,
+                            order);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
+                Collection<Long> records, Timestamp timestamp, Order order,
+                Page page) {
+            return invoke("get", Collection.class, Collection.class,
+                    Timestamp.class, Order.class, Page.class).with(keys,
+                            records, timestamp, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
+                Collection<Long> records, Timestamp timestamp, Page page) {
+            return invoke("get", Collection.class, Collection.class,
+                    Timestamp.class, Page.class).with(keys, records, timestamp,
+                            page);
         }
 
         @Override
@@ -1093,9 +1640,55 @@ public class ManagedConcourseServer {
 
         @Override
         public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
+                Criteria criteria, Order order) {
+            return invoke("get", Collection.class, Criteria.class, Order.class)
+                    .with(keys, criteria, order);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
+                Criteria criteria, Order order, Page page) {
+            return invoke("get", Collection.class, Criteria.class, Order.class,
+                    Page.class).with(keys, criteria, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
+                Criteria criteria, Page page) {
+            return invoke("get", Collection.class, Criteria.class, Page.class)
+                    .with(keys, criteria, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
                 Criteria criteria, Timestamp timestamp) {
             return invoke("get", Collection.class, Criteria.class,
                     Timestamp.class).with(keys, criteria, timestamp);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
+                Criteria criteria, Timestamp timestamp, Order order) {
+            return invoke("get", Collection.class, Criteria.class,
+                    Timestamp.class, Order.class).with(keys, criteria,
+                            timestamp, order);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
+                Criteria criteria, Timestamp timestamp, Order order,
+                Page page) {
+            return invoke("get", Collection.class, Criteria.class,
+                    Timestamp.class, Order.class, Page.class).with(keys,
+                            criteria, timestamp, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
+                Criteria criteria, Timestamp timestamp, Page page) {
+            return invoke("get", Collection.class, Criteria.class,
+                    Timestamp.class, Page.class).with(keys, criteria, timestamp,
+                            page);
         }
 
         @Override
@@ -1112,23 +1705,30 @@ public class ManagedConcourseServer {
 
         @Override
         public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
-                Object criteria) {
-            return invoke("get", Collection.class, Object.class).with(keys,
-                    criteria);
-        }
-
-        @Override
-        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
-                Object criteria, Timestamp timestamp) {
-            return invoke("get", Collection.class, Object.class,
-                    Timestamp.class).with(keys, criteria, timestamp);
-        }
-
-        @Override
-        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
                 String ccl) {
-            return invoke("get", Collection.class, String.class)
-                    .with(keys, ccl);
+            return invoke("get", Collection.class, String.class).with(keys,
+                    ccl);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
+                String ccl, Order order) {
+            return invoke("get", Collection.class, String.class, Order.class)
+                    .with(keys, ccl, order);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
+                String ccl, Order order, Page page) {
+            return invoke("get", Collection.class, String.class, Order.class,
+                    Page.class).with(keys, ccl, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
+                String ccl, Page page) {
+            return invoke("get", Collection.class, String.class, Page.class)
+                    .with(keys, ccl, page);
         }
 
         @Override
@@ -1139,27 +1739,80 @@ public class ManagedConcourseServer {
         }
 
         @Override
+        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
+                String ccl, Timestamp timestamp, Order order) {
+            return invoke("get", Collection.class, String.class,
+                    Timestamp.class, Order.class).with(keys, ccl, timestamp,
+                            order);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
+                String ccl, Timestamp timestamp, Order order, Page page) {
+            return invoke("get", Collection.class, String.class,
+                    Timestamp.class, Order.class, Page.class).with(keys, ccl,
+                            timestamp, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Collection<String> keys,
+                String ccl, Timestamp timestamp, Page page) {
+            return invoke("get", Collection.class, String.class,
+                    Timestamp.class, Page.class).with(keys, ccl, timestamp,
+                            page);
+        }
+
+        @Override
         public <T> Map<Long, Map<String, T>> get(Criteria criteria) {
             return invoke("get", Criteria.class).with(criteria);
         }
 
         @Override
         public <T> Map<Long, Map<String, T>> get(Criteria criteria,
-                Timestamp timestamp) {
-            return invoke("get", Criteria.class, Timestamp.class).with(
-                    criteria, timestamp);
+                Order order) {
+            return invoke("get", Criteria.class, Order.class).with(criteria,
+                    order);
         }
 
         @Override
-        public <T> Map<Long, Map<String, T>> get(Object criteria) {
-            return invoke("get", Object.class).with(criteria);
+        public <T> Map<Long, Map<String, T>> get(Criteria criteria, Order order,
+                Page page) {
+            return invoke("get", Criteria.class, Order.class, Page.class)
+                    .with(criteria, order, page);
         }
 
         @Override
-        public <T> Map<Long, Map<String, T>> get(Object criteria,
+        public <T> Map<Long, Map<String, T>> get(Criteria criteria, Page page) {
+            return invoke("get", Criteria.class, Page.class).with(criteria,
+                    page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Criteria criteria,
                 Timestamp timestamp) {
-            return invoke("get", Object.class, Timestamp.class).with(criteria,
+            return invoke("get", Criteria.class, Timestamp.class).with(criteria,
                     timestamp);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Criteria criteria,
+                Timestamp timestamp, Order order) {
+            return invoke("get", Criteria.class, Timestamp.class, Order.class)
+                    .with(criteria, timestamp, order);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Criteria criteria,
+                Timestamp timestamp, Order order, Page page) {
+            return invoke("get", Criteria.class, Timestamp.class, Order.class,
+                    Page.class).with(criteria, timestamp, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(Criteria criteria,
+                Timestamp timestamp, Page page) {
+            return invoke("get", Criteria.class, Timestamp.class, Page.class)
+                    .with(criteria, timestamp, page);
         }
 
         @Override
@@ -1175,9 +1828,54 @@ public class ManagedConcourseServer {
 
         @Override
         public <T> Map<Long, T> get(String key, Collection<Long> records,
+                Order order) {
+            return invoke("get", String.class, Collection.class, Order.class)
+                    .with(key, records, order);
+        }
+
+        @Override
+        public <T> Map<Long, T> get(String key, Collection<Long> records,
+                Order order, Page page) {
+            return invoke("get", String.class, Collection.class, Order.class,
+                    Page.class).with(key, records, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, T> get(String key, Collection<Long> records,
+                Page page) {
+            return invoke("get", String.class, Collection.class, Page.class)
+                    .with(key, records, page);
+        }
+
+        @Override
+        public <T> Map<Long, T> get(String key, Collection<Long> records,
                 Timestamp timestamp) {
             return invoke("get", String.class, Collection.class,
                     Timestamp.class).with(key, records, timestamp);
+        }
+
+        @Override
+        public <T> Map<Long, T> get(String key, Collection<Long> records,
+                Timestamp timestamp, Order order) {
+            return invoke("get", String.class, Collection.class,
+                    Timestamp.class, Order.class).with(key, records, timestamp,
+                            order);
+        }
+
+        @Override
+        public <T> Map<Long, T> get(String key, Collection<Long> records,
+                Timestamp timestamp, Order order, Page page) {
+            return invoke("get", String.class, Collection.class,
+                    Timestamp.class, Order.class, Page.class).with(key, records,
+                            timestamp, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, T> get(String key, Collection<Long> records,
+                Timestamp timestamp, Page page) {
+            return invoke("get", String.class, Collection.class,
+                    Timestamp.class, Page.class).with(key, records, timestamp,
+                            page);
         }
 
         @Override
@@ -1188,9 +1886,51 @@ public class ManagedConcourseServer {
 
         @Override
         public <T> Map<Long, T> get(String key, Criteria criteria,
+                Order order) {
+            return invoke("get", String.class, Criteria.class, Order.class)
+                    .with(key, criteria, order);
+        }
+
+        @Override
+        public <T> Map<Long, T> get(String key, Criteria criteria, Order order,
+                Page page) {
+            return invoke("get", String.class, Criteria.class, Order.class,
+                    Page.class).with(key, criteria, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, T> get(String key, Criteria criteria, Page page) {
+            return invoke("get", String.class, Criteria.class, Page.class)
+                    .with(key, criteria, page);
+        }
+
+        @Override
+        public <T> Map<Long, T> get(String key, Criteria criteria,
                 Timestamp timestamp) {
             return invoke("get", String.class, Criteria.class, Timestamp.class)
                     .with(key, criteria, timestamp);
+        }
+
+        @Override
+        public <T> Map<Long, T> get(String key, Criteria criteria,
+                Timestamp timestamp, Order order) {
+            return invoke("get", String.class, Criteria.class, Timestamp.class,
+                    Order.class).with(key, criteria, timestamp, order);
+        }
+
+        @Override
+        public <T> Map<Long, T> get(String key, Criteria criteria,
+                Timestamp timestamp, Order order, Page page) {
+            return invoke("get", String.class, Criteria.class, Timestamp.class,
+                    Order.class, Page.class).with(key, criteria, timestamp,
+                            order, page);
+        }
+
+        @Override
+        public <T> Map<Long, T> get(String key, Criteria criteria,
+                Timestamp timestamp, Page page) {
+            return invoke("get", String.class, Criteria.class, Timestamp.class,
+                    Page.class).with(key, criteria, timestamp, page);
         }
 
         @Override
@@ -1205,33 +1945,101 @@ public class ManagedConcourseServer {
         }
 
         @Override
-        public <T> Map<Long, T> get(String key, Object criteria) {
-            return invoke("find", String.class, Object.class).with(key,
-                    criteria);
+        public <T> Map<Long, Map<String, T>> get(String ccl, Order order) {
+            return invoke("get", String.class, Order.class).with(ccl, order);
         }
 
         @Override
-        public <T> Map<Long, T> get(String key, Object criteria,
-                Timestamp timestamp) {
-            return invoke("get", String.class, Object.class, Timestamp.class)
-                    .with(key, criteria, timestamp);
+        public <T> Map<Long, Map<String, T>> get(String ccl, Order order,
+                Page page) {
+            return invoke("get", String.class, Order.class, Page.class)
+                    .with(ccl, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(String ccl, Page page) {
+            return invoke("get", String.class, Page.class).with(ccl, page);
         }
 
         @Override
         public <T> Map<Long, T> get(String key, String ccl) {
-            return invoke("find", String.class, String.class).with(key, ccl);
+            return invoke("get", String.class, String.class).with(key, ccl);
         }
 
         @Override
-        public <T> Map<Long, T> get(String key, String ccl, Timestamp timestamp) {
-            return invoke("find", String.class, String.class, Timestamp.class)
+        public <T> Map<Long, T> get(String key, String ccl, Order order) {
+            return invoke("get", String.class, String.class, Order.class)
+                    .with(key, ccl, order);
+        }
+
+        @Override
+        public <T> Map<Long, T> get(String key, String ccl, Order order,
+                Page page) {
+            return invoke("get", String.class, String.class, Order.class,
+                    Page.class).with(key, ccl, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, T> get(String key, String ccl, Page page) {
+            return invoke("get", String.class, String.class, Page.class)
+                    .with(key, ccl, page);
+        }
+
+        @Override
+        public <T> Map<Long, T> get(String key, String ccl,
+                Timestamp timestamp) {
+            return invoke("get", String.class, String.class, Timestamp.class)
                     .with(key, ccl, timestamp);
         }
 
         @Override
-        public <T> Map<Long, Map<String, T>> get(String ccl, Timestamp timestamp) {
+        public <T> Map<Long, T> get(String key, String ccl, Timestamp timestamp,
+                Order order) {
+            return invoke("get", String.class, String.class, Timestamp.class,
+                    Order.class).with(key, ccl, timestamp, order);
+        }
+
+        @Override
+        public <T> Map<Long, T> get(String key, String ccl, Timestamp timestamp,
+                Order order, Page page) {
+            return invoke("get", String.class, String.class, Timestamp.class,
+                    Order.class, Page.class).with(key, ccl, timestamp, order,
+                            page);
+        }
+
+        @Override
+        public <T> Map<Long, T> get(String key, String ccl, Timestamp timestamp,
+                Page page) {
+            return invoke("get", String.class, String.class, Timestamp.class,
+                    Page.class).with(key, ccl, timestamp, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(String ccl,
+                Timestamp timestamp) {
             return invoke("get", String.class, Timestamp.class).with(ccl,
                     timestamp);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(String ccl,
+                Timestamp timestamp, Order order) {
+            return invoke("get", String.class, Timestamp.class, Order.class)
+                    .with(ccl, timestamp, order);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(String ccl,
+                Timestamp timestamp, Order order, Page page) {
+            return invoke("get", String.class, Timestamp.class, Order.class,
+                    Page.class).with(ccl, timestamp, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, T>> get(String ccl,
+                Timestamp timestamp, Page page) {
+            return invoke("get", String.class, Timestamp.class, Page.class)
+                    .with(ccl, timestamp, page);
         }
 
         @Override
@@ -1250,20 +2058,27 @@ public class ManagedConcourseServer {
         }
 
         @Override
-        public Map<Long, Boolean> insert(String json, Collection<Long> records) {
+        public Map<Long, Boolean> insert(String json,
+                Collection<Long> records) {
             return invoke("insert", String.class, Collection.class).with(json,
                     records);
         }
 
         @Override
         public boolean insert(String json, long record) {
-            return invoke("insert", String.class, long.class)
-                    .with(json, record);
+            return invoke("insert", String.class, long.class).with(json,
+                    record);
         }
 
         @Override
         public Set<Long> inventory() {
             return invoke("inventory").with();
+        }
+
+        @Override
+        public <T> T invokePlugin(String id, String method, Object... args) {
+            return invoke("invokePlugin", String.class, String.class,
+                    Object[].class).with(id, method, args);
         }
 
         @Override
@@ -1273,14 +2088,14 @@ public class ManagedConcourseServer {
 
         @Override
         public String jsonify(Collection<Long> records, boolean identifier) {
-            return invoke("jsonify", Collection.class, boolean.class).with(
-                    records, identifier);
+            return invoke("jsonify", Collection.class, boolean.class)
+                    .with(records, identifier);
         }
 
         @Override
         public String jsonify(Collection<Long> records, Timestamp timestamp) {
-            return invoke("jsonify", Collection.class, Timestamp.class).with(
-                    records, timestamp);
+            return invoke("jsonify", Collection.class, Timestamp.class)
+                    .with(records, timestamp);
         }
 
         @Override
@@ -1315,16 +2130,127 @@ public class ManagedConcourseServer {
         }
 
         @Override
-        public Map<Long, Boolean> link(String key, long source,
-                Collection<Long> destinations) {
+        public Map<Long, Boolean> link(String key,
+                Collection<Long> destinations, long source) {
             return invoke("link", String.class, long.class, Collection.class)
-                    .with(key, source, destinations);
+                    .with(key, destinations, source);
         }
 
         @Override
-        public boolean link(String key, long source, long destination) {
-            return invoke("link", String.class, long.class, long.class).with(
-                    key, source, destination);
+        public boolean link(String key, long destination, long source) {
+            return invoke("link", String.class, long.class, long.class)
+                    .with(key, destination, source);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> navigate(
+                Collection<String> keys, Collection<Long> records) {
+            return invoke("navigate", Collection.class, Collection.class)
+                    .with(keys, records);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> navigate(
+                Collection<String> keys, Collection<Long> records,
+                Timestamp timestamp) {
+            return invoke("navigate", Collection.class, Collection.class,
+                    Timestamp.class).with(keys, records, timestamp);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> navigate(
+                Collection<String> keys, Criteria criteria) {
+            return invoke("navigate", Collection.class, Criteria.class)
+                    .with(keys, criteria);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> navigate(
+                Collection<String> keys, Criteria criteria,
+                Timestamp timestamp) {
+            return invoke("navigate", Collection.class, Criteria.class,
+                    Timestamp.class).with(keys, criteria, timestamp);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> navigate(
+                Collection<String> keys, long record) {
+            return invoke("navigate", Collection.class, long.class).with(keys,
+                    record);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> navigate(
+                Collection<String> keys, long record, Timestamp timestamp) {
+            return invoke("navigate", Collection.class, long.class,
+                    Timestamp.class).with(keys, record, timestamp);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> navigate(
+                Collection<String> keys, String ccl) {
+            return invoke("navigate", Collection.class, String.class).with(keys,
+                    ccl);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> navigate(
+                Collection<String> keys, String ccl, Timestamp timestamp) {
+            return invoke("navigate", Collection.class, String.class,
+                    Timestamp.class).with(keys, ccl, timestamp);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> navigate(String key,
+                Collection<Long> records) {
+            return invoke("navigate", String.class, Collection.class).with(key,
+                    records);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> navigate(String key,
+                Collection<Long> records, Timestamp timestamp) {
+            return invoke("navigate", String.class, Collection.class,
+                    Timestamp.class).with(key, records, timestamp);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> navigate(String key, Criteria criteria) {
+            return invoke("navigate", String.class, String.class).with(key,
+                    criteria);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> navigate(String key, Criteria criteria,
+                Timestamp timestamp) {
+            return invoke("navigate", String.class, Criteria.class,
+                    Timestamp.class).with(key, criteria, timestamp);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> navigate(String key, long record) {
+            return invoke("navigate", String.class, long.class).with(key,
+                    record);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> navigate(String key, long record,
+                Timestamp timestamp) {
+            return invoke("navigate", String.class, long.class, Timestamp.class)
+                    .with(key, record, timestamp);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> navigate(String key, String ccl) {
+            return invoke("navigate", String.class, Criteria.class).with(key,
+                    ccl);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> navigate(String key, String ccl,
+                Timestamp timestamp) {
+            return invoke("navigate", String.class, String.class,
+                    Timestamp.class).with(key, ccl, timestamp);
         }
 
         @Override
@@ -1338,10 +2264,17 @@ public class ManagedConcourseServer {
         }
 
         @Override
+        public <T> void reconcile(String key, long record,
+                Collection<T> values) {
+            invoke("reconcile", String.class, long.class, Collection.class)
+                    .with(key, record, values);
+        }
+
+        @Override
         public <T> Map<Long, Boolean> remove(String key, T value,
                 Collection<Long> records) {
-            return invoke("remove", String.class, Object.class,
-                    Collection.class).with(key, value, records);
+            return invoke("remove", String.class, long.class, Collection.class)
+                    .with(key, value, records);
         }
 
         @Override
@@ -1355,14 +2288,13 @@ public class ManagedConcourseServer {
                 Timestamp timestamp) {
             invoke("revert", Collection.class, Collection.class,
                     Timestamp.class).with(keys, records, timestamp);
-
         }
 
         @Override
         public void revert(Collection<String> keys, long record,
                 Timestamp timestamp) {
-            invoke("revert", String.class, long.class, Timestamp.class).with(
-                    keys, record, timestamp);
+            invoke("revert", String.class, long.class, Timestamp.class)
+                    .with(keys, record, timestamp);
 
         }
 
@@ -1376,35 +2308,140 @@ public class ManagedConcourseServer {
 
         @Override
         public void revert(String key, long record, Timestamp timestamp) {
-            invoke("revert", String.class, long.class, Timestamp.class).with(
-                    key, record, timestamp);
+            invoke("revert", String.class, long.class, Timestamp.class)
+                    .with(key, record, timestamp);
 
+        }
+
+        @Override
+        public Map<Timestamp, List<String>> review(long record) {
+            return invoke("review", long.class).with(record);
+        }
+
+        @Override
+        public Map<Timestamp, List<String>> review(long record,
+                Timestamp start) {
+            return invoke("review", long.class, Timestamp.class).with(record,
+                    start);
+        }
+
+        @Override
+        public Map<Timestamp, List<String>> review(long record, Timestamp start,
+                Timestamp end) {
+            return invoke("review", long.class, Timestamp.class,
+                    Timestamp.class).with(start, end);
+        }
+
+        @Override
+        public Map<Timestamp, List<String>> review(String key, long record) {
+            return invoke("review", String.class, long.class).with(key, record);
+        }
+
+        @Override
+        public Map<Timestamp, List<String>> review(String key, long record,
+                Timestamp start) {
+            return invoke("review", String.class, long.class, Timestamp.class)
+                    .with(key, record, start);
+        }
+
+        @Override
+        public Map<Timestamp, List<String>> review(String key, long record,
+                Timestamp start, Timestamp end) {
+            return invoke("review", String.class, long.class, Timestamp.class,
+                    Timestamp.class).with(key, record, start, end);
         }
 
         @Override
         public Set<Long> search(String key, String query) {
-            return invoke("search", String.class, String.class)
-                    .with(key, query);
+            return invoke("search", String.class, String.class).with(key,
+                    query);
         }
 
         @Override
-        public Map<Long, Map<String, Set<Object>>> select(
+        public <T> Map<Long, Map<String, Set<T>>> select(
                 Collection<Long> records) {
             return invoke("select", Collection.class).with(records);
         }
 
         @Override
-        public Map<Long, Map<String, Set<Object>>> select(
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<Long> records, Order order) {
+            return invoke("select", Collection.class, Order.class).with(records,
+                    order);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<Long> records, Order order, Page page) {
+            return invoke("select", Collection.class, Order.class, Page.class)
+                    .with(records, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<Long> records, Page page) {
+            return invoke("select", Collection.class, Page.class).with(records,
+                    page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
                 Collection<Long> records, Timestamp timestamp) {
-            return invoke("select", Collection.class, Timestamp.class).with(
-                    records, timestamp);
+            return invoke("select", Collection.class, Timestamp.class)
+                    .with(records, timestamp);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<Long> records, Timestamp timestamp, Order order) {
+            return invoke("select", Collection.class, Timestamp.class,
+                    Order.class).with(records, timestamp, order);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<Long> records, Timestamp timestamp, Order order,
+                Page page) {
+            return invoke("select", Collection.class, Timestamp.class,
+                    Order.class, Page.class).with(records, timestamp, order,
+                            page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<Long> records, Timestamp timestamp, Page page) {
+            return invoke("select", Collection.class, Timestamp.class,
+                    Page.class).with(records, timestamp, page);
         }
 
         @Override
         public <T> Map<Long, Map<String, Set<T>>> select(
                 Collection<String> keys, Collection<Long> records) {
-            return invoke("select", Collection.class, Collection.class).with(
-                    keys, records);
+            return invoke("select", Collection.class, Collection.class)
+                    .with(keys, records);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<String> keys, Collection<Long> records,
+                Order order) {
+            return invoke("select", Collection.class, Collection.class,
+                    Order.class).with(keys, records, order);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<String> keys, Collection<Long> records, Order order,
+                Page page) {
+            return invoke("select", Collection.class, Collection.class,
+                    Order.class, Page.class).with(keys, records, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<String> keys, Collection<Long> records, Page page) {
+            return invoke("select", Collection.class, Collection.class,
+                    Page.class).with(keys, records, page);
         }
 
         @Override
@@ -1417,16 +2454,93 @@ public class ManagedConcourseServer {
 
         @Override
         public <T> Map<Long, Map<String, Set<T>>> select(
-                Collection<String> keys, Criteria criteria) {
-            return invoke("select", Collection.class, Criteria.class).with(
-                    keys, criteria);
+                Collection<String> keys, Collection<Long> records,
+                Timestamp timestamp, Order order) {
+            return invoke("select", Collection.class, Collection.class,
+                    Timestamp.class, Order.class).with(keys, records, timestamp,
+                            order);
         }
 
         @Override
         public <T> Map<Long, Map<String, Set<T>>> select(
-                Collection<String> keys, Criteria criteria, Timestamp timestamp) {
+                Collection<String> keys, Collection<Long> records,
+                Timestamp timestamp, Order order, Page page) {
+            return invoke("select", Collection.class, Collection.class,
+                    Timestamp.class, Order.class, Page.class).with(keys,
+                            records, timestamp, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<String> keys, Collection<Long> records,
+                Timestamp timestamp, Page page) {
+            return invoke("select", Collection.class, Collection.class,
+                    Timestamp.class, Page.class).with(keys, records, timestamp,
+                            page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<String> keys, Criteria criteria) {
+            return invoke("select", Collection.class, Criteria.class).with(keys,
+                    criteria);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<String> keys, Criteria criteria, Order order) {
+            return invoke("select", Collection.class, Criteria.class,
+                    Order.class).with(keys, criteria, order);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<String> keys, Criteria criteria, Order order,
+                Page page) {
+            return invoke("select", Collection.class, Criteria.class,
+                    Order.class, Page.class).with(keys, criteria, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<String> keys, Criteria criteria, Page page) {
+            return invoke("select", Collection.class, Criteria.class,
+                    Page.class).with(keys, criteria, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<String> keys, Criteria criteria,
+                Timestamp timestamp) {
             return invoke("select", Collection.class, Criteria.class,
                     Timestamp.class).with(keys, criteria, timestamp);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<String> keys, Criteria criteria, Timestamp timestamp,
+                Order order) {
+            return invoke("select", Collection.class, Criteria.class,
+                    Timestamp.class, Order.class).with(keys, criteria,
+                            timestamp, order);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<String> keys, Criteria criteria, Timestamp timestamp,
+                Order order, Page page) {
+            return invoke("select", Collection.class, Criteria.class,
+                    Timestamp.class, Order.class, Page.class).with(keys,
+                            criteria, timestamp, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<String> keys, Criteria criteria, Timestamp timestamp,
+                Page page) {
+            return invoke("select", Collection.class, Criteria.class,
+                    Timestamp.class, Page.class).with(keys, criteria, timestamp,
+                            page);
         }
 
         @Override
@@ -1445,23 +2559,30 @@ public class ManagedConcourseServer {
 
         @Override
         public <T> Map<Long, Map<String, Set<T>>> select(
-                Collection<String> keys, Object criteria) {
-            return invoke("select", Collection.class, Object.class).with(keys,
-                    criteria);
-        }
-
-        @Override
-        public <T> Map<Long, Map<String, Set<T>>> select(
-                Collection<String> keys, Object criteria, Timestamp timestamp) {
-            return invoke("select", Collection.class, Object.class,
-                    Timestamp.class).with(keys, criteria, timestamp);
-        }
-
-        @Override
-        public <T> Map<Long, Map<String, Set<T>>> select(
                 Collection<String> keys, String ccl) {
             return invoke("select", Collection.class, String.class).with(keys,
                     ccl);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<String> keys, String ccl, Order order) {
+            return invoke("select", Collection.class, String.class, Order.class)
+                    .with(keys, ccl, order);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<String> keys, String ccl, Order order, Page page) {
+            return invoke("select", Collection.class, String.class, Order.class,
+                    Page.class).with(keys, ccl, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<String> keys, String ccl, Page page) {
+            return invoke("select", Collection.class, String.class, Page.class)
+                    .with(keys, ccl, page);
         }
 
         @Override
@@ -1472,38 +2593,96 @@ public class ManagedConcourseServer {
         }
 
         @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<String> keys, String ccl, Timestamp timestamp,
+                Order order) {
+            return invoke("select", Collection.class, String.class,
+                    Timestamp.class, Order.class).with(keys, ccl, timestamp,
+                            order);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<String> keys, String ccl, Timestamp timestamp,
+                Order order, Page page) {
+            return invoke("select", Collection.class, String.class, Order.class,
+                    Page.class).with(keys, ccl, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(
+                Collection<String> keys, String ccl, Timestamp timestamp,
+                Page page) {
+            return invoke("select", Collection.class, String.class,
+                    Timestamp.class, Page.class).with(keys, ccl, timestamp,
+                            page);
+        }
+
+        @Override
         public <T> Map<Long, Map<String, Set<T>>> select(Criteria criteria) {
             return invoke("select", Criteria.class).with(criteria);
         }
 
         @Override
         public <T> Map<Long, Map<String, Set<T>>> select(Criteria criteria,
-                Timestamp timestamp) {
-            return invoke("select", Criteria.class, Timestamp.class).with(
-                    criteria, timestamp);
+                Order order) {
+            return invoke("select", Criteria.class, Order.class).with(criteria,
+                    order);
         }
 
         @Override
-        public Map<String, Set<Object>> select(long record) {
+        public <T> Map<Long, Map<String, Set<T>>> select(Criteria criteria,
+                Order order, Page page) {
+            return invoke("select", Criteria.class, Order.class, Page.class)
+                    .with(criteria, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(Criteria criteria,
+                Page page) {
+            return invoke("select", Criteria.class, Page.class).with(criteria,
+                    page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(Criteria criteria,
+                Timestamp timestamp) {
+            return invoke("select", Criteria.class, Timestamp.class)
+                    .with(criteria, timestamp);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(Criteria criteria,
+                Timestamp timestamp, Order order) {
+            return invoke("select", Criteria.class, Timestamp.class,
+                    Order.class).with(criteria, timestamp, order);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(Criteria criteria,
+                Timestamp timestamp, Order order, Page page) {
+            return invoke("select", Criteria.class, Timestamp.class,
+                    Order.class, Page.class).with(criteria, timestamp, order,
+                            page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(Criteria criteria,
+                Timestamp timestamp, Page page) {
+            return invoke("select", Criteria.class, Timestamp.class, Page.class)
+                    .with(criteria, timestamp, page);
+        }
+
+        @Override
+        public <T> Map<String, Set<T>> select(long record) {
             return invoke("select", long.class).with(record);
         }
 
         @Override
-        public Map<String, Set<Object>> select(long record, Timestamp timestamp) {
+        public <T> Map<String, Set<T>> select(long record,
+                Timestamp timestamp) {
             return invoke("select", long.class, Timestamp.class).with(record,
                     timestamp);
-        }
-
-        @Override
-        public <T> Map<Long, Map<String, Set<T>>> select(Object criteria) {
-            return invoke("select", Object.class).with(criteria);
-        }
-
-        @Override
-        public <T> Map<Long, Map<String, Set<T>>> select(Object criteria,
-                Timestamp timestamp) {
-            return invoke("select", Object.class, Timestamp.class).with(
-                    criteria, timestamp);
         }
 
         @Override
@@ -1512,9 +2691,31 @@ public class ManagedConcourseServer {
         }
 
         @Override
-        public <T> Map<Long, Set<T>> select(String key, Collection<Long> records) {
+        public <T> Map<Long, Set<T>> select(String key,
+                Collection<Long> records) {
             return invoke("select", String.class, Collection.class).with(key,
                     records);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> select(String key,
+                Collection<Long> records, Order order) {
+            return invoke("select", String.class, Collection.class, Order.class)
+                    .with(key, records, order);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> select(String key,
+                Collection<Long> records, Order order, Page page) {
+            return invoke("select", String.class, Collection.class, Order.class,
+                    Page.class).with(key, records, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> select(String key,
+                Collection<Long> records, Page page) {
+            return invoke("select", String.class, Collection.class, Page.class)
+                    .with(key, records, page);
         }
 
         @Override
@@ -1525,6 +2726,31 @@ public class ManagedConcourseServer {
         }
 
         @Override
+        public <T> Map<Long, Set<T>> select(String key,
+                Collection<Long> records, Timestamp timestamp, Order order) {
+            return invoke("select", String.class, Collection.class,
+                    Timestamp.class, Order.class).with(key, records, timestamp,
+                            order);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> select(String key,
+                Collection<Long> records, Timestamp timestamp, Order order,
+                Page page) {
+            return invoke("select", String.class, Collection.class,
+                    Timestamp.class, Order.class, Page.class).with(key, records,
+                            timestamp, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> select(String key,
+                Collection<Long> records, Timestamp timestamp, Page page) {
+            return invoke("select", String.class, Collection.class,
+                    Timestamp.class, Page.class).with(key, records, timestamp,
+                            page);
+        }
+
+        @Override
         public <T> Map<Long, Set<T>> select(String key, Criteria criteria) {
             return invoke("select", String.class, Criteria.class).with(key,
                     criteria);
@@ -1532,9 +2758,54 @@ public class ManagedConcourseServer {
 
         @Override
         public <T> Map<Long, Set<T>> select(String key, Criteria criteria,
+                Order order) {
+            return invoke("select", String.class, Criteria.class, Order.class)
+                    .with(key, criteria, order);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> select(String key, Criteria criteria,
+                Order order, Page page) {
+            return invoke("select", String.class, Criteria.class, Order.class,
+                    Page.class).with(key, criteria, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> select(String key, Criteria criteria,
+                Page page) {
+            return invoke("select", String.class, Criteria.class, Page.class)
+                    .with(key, criteria, page);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> select(String key, Criteria criteria,
                 Timestamp timestamp) {
             return invoke("select", String.class, Criteria.class,
                     Timestamp.class).with(key, criteria, timestamp);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> select(String key, Criteria criteria,
+                Timestamp timestamp, Order order) {
+            return invoke("select", String.class, Criteria.class,
+                    Timestamp.class, Order.class).with(key, criteria, timestamp,
+                            order);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> select(String key, Criteria criteria,
+                Timestamp timestamp, Order order, Page page) {
+            return invoke("select", String.class, Criteria.class,
+                    Timestamp.class, Order.class, Page.class).with(key,
+                            criteria, timestamp, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> select(String key, Criteria criteria,
+                Timestamp timestamp, Page page) {
+            return invoke("select", String.class, Criteria.class,
+                    Timestamp.class, Page.class).with(key, criteria, timestamp,
+                            page);
         }
 
         @Override
@@ -1549,21 +2820,47 @@ public class ManagedConcourseServer {
         }
 
         @Override
-        public <T> Map<Long, Set<T>> select(String key, Object criteria) {
-            return invoke("select", String.class, Object.class).with(key,
-                    criteria);
+        public <T> Map<Long, Map<String, Set<T>>> select(String ccl,
+                Order order) {
+            return invoke("select", String.class, Order.class).with(ccl, order);
         }
 
         @Override
-        public <T> Map<Long, Set<T>> select(String key, Object criteria,
-                Timestamp timestamp) {
-            return invoke("select", String.class, Object.class, Timestamp.class)
-                    .with(key, criteria, timestamp);
+        public <T> Map<Long, Map<String, Set<T>>> select(String ccl,
+                Order order, Page page) {
+            return invoke("select", String.class, Order.class, Page.class)
+                    .with(ccl, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(String ccl,
+                Page page) {
+            return invoke("select", String.class, Page.class).with(ccl, page);
         }
 
         @Override
         public <T> Map<Long, Set<T>> select(String key, String ccl) {
             return invoke("select", String.class, String.class).with(key, ccl);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> select(String key, String ccl,
+                Order order) {
+            return invoke("select", String.class, String.class, Order.class)
+                    .with(key, ccl, order);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> select(String key, String ccl, Order order,
+                Page page) {
+            return invoke("select", String.class, String.class, Order.class,
+                    Page.class).with(key, ccl, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> select(String key, String ccl, Page page) {
+            return invoke("select", String.class, String.class, Page.class)
+                    .with(key, ccl, page);
         }
 
         @Override
@@ -1574,6 +2871,28 @@ public class ManagedConcourseServer {
         }
 
         @Override
+        public <T> Map<Long, Set<T>> select(String key, String ccl,
+                Timestamp timestamp, Order order) {
+            return invoke("select", String.class, String.class, Timestamp.class,
+                    Order.class).with(key, ccl, timestamp, order);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> select(String key, String ccl,
+                Timestamp timestamp, Order order, Page page) {
+            return invoke("select", String.class, String.class, Timestamp.class,
+                    Order.class, Page.class).with(key, ccl, timestamp, order,
+                            page);
+        }
+
+        @Override
+        public <T> Map<Long, Set<T>> select(String key, String ccl,
+                Timestamp timestamp, Page page) {
+            return invoke("select", String.class, String.class, Timestamp.class,
+                    Page.class).with(key, ccl, timestamp, page);
+        }
+
+        @Override
         public <T> Map<Long, Map<String, Set<T>>> select(String ccl,
                 Timestamp timestamp) {
             return invoke("select", String.class, Timestamp.class).with(ccl,
@@ -1581,22 +2900,41 @@ public class ManagedConcourseServer {
         }
 
         @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(String ccl,
+                Timestamp timestamp, Order order) {
+            return invoke("select", String.class, Timestamp.class, Order.class)
+                    .with(ccl, timestamp, order);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(String ccl,
+                Timestamp timestamp, Order order, Page page) {
+            return invoke("select", String.class, Timestamp.class, Order.class,
+                    Page.class).with(ccl, timestamp, order, page);
+        }
+
+        @Override
+        public <T> Map<Long, Map<String, Set<T>>> select(String ccl,
+                Timestamp timestamp, Page page) {
+            return invoke("select", String.class, Timestamp.class, Page.class)
+                    .with(ccl, timestamp, page);
+        }
+
+        @Override
         public void set(String key, Object value, Collection<Long> records) {
-            invoke("set", String.class, Object.class, Collection.class).with(
-                    key, value, records);
+            invoke("set", String.class, Object.class, Collection.class)
+                    .with(key, value, records);
         }
 
         @Override
         public <T> void set(String key, T value, long record) {
             invoke("set", String.class, Object.class, long.class).with(key,
                     value, record);
-
         }
 
         @Override
         public void stage() {
             invoke("stage").with();
-
         }
 
         @Override
@@ -1610,9 +2948,33 @@ public class ManagedConcourseServer {
         }
 
         @Override
-        public boolean unlink(String key, long source, long destination) {
-            return invoke("unlink", String.class, long.class, long.class).with(
-                    key, source, destination);
+        public Map<Long, Map<String, Set<Long>>> trace(
+                Collection<Long> records) {
+            return invoke("trace", Collection.class).with(records);
+        }
+
+        @Override
+        public Map<Long, Map<String, Set<Long>>> trace(Collection<Long> records,
+                Timestamp timestamp) {
+            return invoke("trace", Collection.class, Timestamp.class)
+                    .with(records, timestamp);
+        }
+
+        @Override
+        public Map<String, Set<Long>> trace(long record) {
+            return invoke("trace", long.class).with(record);
+        }
+
+        @Override
+        public Map<String, Set<Long>> trace(long record, Timestamp timestamp) {
+            return invoke("trace", long.class, Timestamp.class).with(record,
+                    timestamp);
+        }
+
+        @Override
+        public boolean unlink(String key, long destination, long source) {
+            return invoke("unlink", String.class, long.class, long.class)
+                    .with(key, destination, source);
         }
 
         @Override
@@ -1624,7 +2986,7 @@ public class ManagedConcourseServer {
         @Override
         public boolean verify(String key, Object value, long record,
                 Timestamp timestamp) {
-            return invoke("audit", String.class, Object.class, long.class,
+            return invoke("review", String.class, Object.class, long.class,
                     Timestamp.class).with(key, value, record, timestamp);
         }
 
@@ -1633,13 +2995,18 @@ public class ManagedConcourseServer {
                 Object replacement) {
             return invoke("verifyAndSwap", String.class, Object.class,
                     long.class, Object.class).with(key, expected, record,
-                    replacement);
+                            replacement);
         }
 
         @Override
         public void verifyOrSet(String key, Object value, long record) {
-            invoke("verifyOrSet", String.class, Object.class, long.class).with(
-                    key, value, record);
+            invoke("verifyOrSet", String.class, Object.class, long.class)
+                    .with(key, value, record);
+        }
+
+        @Override
+        protected Concourse copyConnection() {
+            throw new UnsupportedOperationException();
         }
 
         /**
@@ -1657,25 +3024,34 @@ public class ManagedConcourseServer {
                     // to see if they should be loaded from the server's
                     // classpath.
                     if(parameterTypes[i] == Timestamp.class) {
-                        parameterTypes[i] = loader.loadClass(packageBase
-                                + "Timestamp");
+                        parameterTypes[i] = loader
+                                .loadClass(packageBase + "Timestamp");
                     }
                     else if(parameterTypes[i] == Operator.class) {
-                        parameterTypes[i] = loader.loadClass(packageBase
-                                + "thrift.Operator");
+                        parameterTypes[i] = loader
+                                .loadClass(packageBase + "thrift.Operator");
                     }
                     else if(parameterTypes[i] == Criteria.class) {
-                        parameterTypes[i] = loader.loadClass(packageBase
-                                + "lang.Criteria");
+                        parameterTypes[i] = loader
+                                .loadClass(packageBase + "lang.Criteria");
+                    }
+                    else if(parameterTypes[i] == Page.class) {
+                        parameterTypes[i] = loader
+                                .loadClass(packageBase + "lang.paginate.Page");
+                    }
+                    else if(parameterTypes[i] == Order.class) {
+                        parameterTypes[i] = loader
+                                .loadClass(packageBase + "lang.sort.Order");
                     }
                     else {
                         continue;
                     }
                 }
-                return new MethodProxy(clazz.getMethod(method, parameterTypes));
+                return new MethodProxy(Reflection.getMethodUnboxed(clazz,
+                        method, parameterTypes));
             }
             catch (Exception e) {
-                throw Throwables.propagate(e);
+                throw CheckedExceptions.wrapAsRuntimeException(e);
             }
         }
 
@@ -1731,53 +3107,105 @@ public class ManagedConcourseServer {
                         }
                         else if(args[i] instanceof Criteria) {
                             Criteria obj = (Criteria) args[i];
-                            Field symbolField = Criteria.class
-                                    .getDeclaredField("symbols");
-                            symbolField.setAccessible(true);
-                            List<Symbol> symbols = (List<Symbol>) symbolField
-                                    .get(obj);
-                            Class<?> rclazz = loader.loadClass(packageBase
-                                    + "lang.Criteria");
+                            Class<?> rclazz = loader
+                                    .loadClass(packageBase + "lang.Criteria");
+                            Object robj;
+                            try {
+                                Method rfactory = rclazz.getMethod("parse",
+                                        String.class);
+                                rfactory.setAccessible(true);
+                                robj = rfactory.invoke(null, obj.ccl());
+                            }
+                            catch (NoSuchMethodException e) {
+                                // In Concourse versions prior to 0.10, Criteria
+                                // was a concrete class instead of an interface
+                                // so we have to manually reconstruct the class
+                                // and all of its symbols...
+                                Field symbolField = Criteria.class
+                                        .getDeclaredField("symbols");
+                                symbolField.setAccessible(true);
+                                List<Symbol> symbols = (List<Symbol>) symbolField
+                                        .get(obj);
+                                Constructor<?> rconstructor = rclazz
+                                        .getDeclaredConstructor();
+                                rconstructor.setAccessible(true);
+                                robj = rconstructor.newInstance();
+                                Method rmethod = rclazz.getDeclaredMethod("add",
+                                        loader.loadClass(
+                                                packageBase + "lang.Symbol"));
+                                rmethod.setAccessible(true);
+                                for (Symbol symbol : symbols) {
+                                    Object rsymbol = null;
+                                    if(symbol instanceof Enum) {
+                                        rsymbol = loader
+                                                .loadClass(symbol.getClass()
+                                                        .getName())
+                                                .getMethod("valueOf",
+                                                        String.class)
+                                                .invoke(null, ((Enum<?>) symbol)
+                                                        .name());
+                                    }
+                                    else {
+                                        Method symFactory = loader
+                                                .loadClass(symbol.getClass()
+                                                        .getName())
+                                                .getMethod("parse",
+                                                        String.class);
+                                        symFactory.setAccessible(true);
+                                        rsymbol = symFactory.invoke(null,
+                                                symbol.toString());
+                                    }
+                                    rmethod.invoke(robj, rsymbol);
+                                }
+                            }
+                            args[i] = robj;
+                        }
+                        else if(args[i] instanceof Order) {
+                            Order order = (Order) args[i];
+                            List<OrderComponent> spec = order.spec();
+                            Class<?> rclazz = loader.loadClass(
+                                    packageBase + "lang.sort.BuiltOrder");
                             Constructor<?> rconstructor = rclazz
                                     .getDeclaredConstructor();
                             rconstructor.setAccessible(true);
                             Object robj = rconstructor.newInstance();
-                            Method rmethod = rclazz.getDeclaredMethod(
-                                    "add",
-                                    loader.loadClass(packageBase
-                                            + "lang.Symbol"));
+                            Method rmethod = rclazz.getDeclaredMethod("set",
+                                    String.class, long.class, int.class);
                             rmethod.setAccessible(true);
-                            for (Symbol symbol : symbols) {
-                                Object rsymbol = null;
-                                if(symbol instanceof Enum) {
-                                    rsymbol = loader
-                                            .loadClass(
-                                                    symbol.getClass().getName())
-                                            .getMethod("valueOf", String.class)
-                                            .invoke(null,
-                                                    ((Enum<?>) symbol).name());
-                                }
-                                else {
-                                    Method symFactory = loader.loadClass(
-                                            symbol.getClass().getName())
-                                            .getMethod("parse", String.class);
-                                    symFactory.setAccessible(true);
-                                    rsymbol = symFactory.invoke(null,
-                                            symbol.toString());
-                                }
-                                rmethod.invoke(robj, rsymbol);
+                            for (OrderComponent component : spec) {
+                                rmethod.invoke(robj, component.key(),
+                                        component.timestamp() == null ? -1
+                                                : component.timestamp()
+                                                        .getMicros(),
+                                        component.direction().ordinal());
                             }
                             args[i] = robj;
+                        }
+                        else if(args[i] instanceof Page) {
+                            Page obj = (Page) args[i];
+                            Field offsetField = Page.class
+                                    .getDeclaredField("offset");
+                            offsetField.setAccessible(true);
+                            int offset = (Integer) offsetField.get(obj);
+                            Field limitField = Page.class
+                                    .getDeclaredField("limit");
+                            limitField.setAccessible(true);
+                            int limit = (Integer) limitField.get(obj);
+                            args[i] = loader
+                                    .loadClass(
+                                            packageBase + "lang.paginate.Page")
+                                    .getMethod("of", int.class, int.class)
+                                    .invoke(null, offset, limit);
                         }
                         else {
                             continue;
                         }
                     }
-                    return (T) transformServerObject(method.invoke(delegate,
-                            args));
+                    return (T) transformServerObject(
+                            method.invoke(delegate, args));
                 }
                 catch (Exception e) {
-                    throw Throwables.propagate(e);
+                    throw CheckedExceptions.wrapAsRuntimeException(e);
                 }
             }
 
@@ -1811,26 +3239,25 @@ public class ManagedConcourseServer {
                             .getMethod("longValue").invoke(object);
                     object = Link.to(longValue);
                 }
+                else if(object.getClass().getSimpleName()
+                        .equals(Timestamp.class.getSimpleName())) {
+                    long micros = (long) loader
+                            .loadClass(packageBase
+                                    + Timestamp.class.getSimpleName())
+                            .getMethod("getMicros").invoke(object);
+                    object = Timestamp.fromMicros(micros);
+                }
                 return object;
             }
-
         }
-
-        @Override
-        protected Concourse copyConnection() {
-            throw new UnsupportedOperationException();
-        }
-
     }
+}
 
-    /**
-     * Enum for log levels that can be passed to the
-     * {@link #printLogs(LogLevel...)} method
-     * 
-     * @author Jeff Nelson
-     */
-    public enum LogLevel {
-        DEBUG, INFO, WARN, ERROR, CONSOLE
-    }
-
+/**
+ * The valid options for the {@link #clientPrefsCleanupAction} variable.
+ * 
+ * @author Jeff Nelson
+ */
+enum ClientPrefsCleanupAction {
+    DELETE, NONE, RESTORE_BACKUP
 }

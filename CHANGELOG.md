@@ -1,6 +1,456 @@
 ## Changelog
 
-#### Version 0.5.0 (TBD)
+#### Version 0.11.3 (TBD)
+* Improved the performance of commands that select multiple keys from a record by adding herustics to the storage engine to reduce the number of overall lookups required. As a result, commands that select multiple keys are **up to 96% faster**.
+* Fixed a bug that caused Concourse Server to not use the `Strategy` framework to determine the most efficient lookup source (e.g., field, record, or index) for navigation keys.
+* Added support for querying on the intrinsic `identifier` of Records, as both a selection and evaluation key. The record identifier can be refernced using the `$id$` key (NOTE: this must be properly escaped in `concourse shell` as `\$id\$`). 
+	* It is useful to include the Record identifier as a selection key for some navigation reads (e.g., `select(["partner.name", partner.\$id\$], 1)`)).
+	* It is useful to include the Record identifier as an evaluation key in cases where you want to explictly exclude a record from matching a `Condition` (e.g., `select(["partner.name", parner.\$id\$], "\$id\$ != 2")`))
+
+#### Version 0.11.2 (March 18, 2022)
+* Fixed a bug that caused Concourse Server to incorrectly detect when an attempt was made to atomically commit multiple Writes that toggle the state of a field (e.g. `ADD name as jeff in 1`, `REMOVE name as jeff in 1`, `ADD name as jeff in 1`) in user-defined `transactions`. As a result of this bug, all field toggling Writes were committed instead of the desired behaviour where there was a commit of at most one equal Write that was required to obtain the intended field state. Committing multiple writes that toggled the field state within the same transaction could cause failures, unexplained results or fatal inconsistencies when reconciling data.
+* Added a fallback to automatically switch to reading data from Segment files using traditional IO in the event that Concourse Server ever exceedes the maximum number of open memory mapped files allowed (as specified by the `vm.max_map_count` property on some Linux systems).
+* Removed the `DEBUG` logging (added in `0.11.1`) that provides details on the execution path chosen for each lookup because it is too noisy and drastically degrades performance.
+* Fixed a bug in the way that Concourse Server determined if duplicate data existed in the v3 storage files, which caused the `concourse data repair` CLI to no longer work properly (compared to how it worked on the v2 storage files).
+* Fixed a regression that caused a memory leak when data values were read from disk. The nature of the memory leak caused a degradation in performance because Concourse Server was forced to evict cached records from memory more frequently than in previous versions.
+
+#### Version 0.11.1 (March 9, 2022)
+* Upgraded to CCL version `3.1.2` to fix a regression that caused parenthetical expressions within a Condition containing `LIKE` `REGEX`, `NOT_LIKE` and `NOT_REGEX` operators to mistakenly throw a `SyntaxException` when being parsed.
+* Added the `ConcourseCompiler#evaluate(ConditionTree, Multimap)` method that uses the `Operators#evaluate` static method to perform local evaluation.
+* Fixed a bug that, in some cases, caused the wrong default environment to be used when invoking server-side data CLIs (e.g., `concourse data <action>`). When a data CLI was invoked without specifying the environment using the `-e <environment>` flag, the `default` environment was always used instead of the `default_environment` that was specified in the Concourse Server configuration.
+* Fixed a bug that caused the `concourse data compact` CLI to inexplicably die when invoked while `enable_compaction` was set to `false` in the Concourse Server configuration.
+* Fixed the usage message description of the `concourse export` and `concourse import` CLIs.
+* Fixed a bug that caused Concourse Shell to fail to parse short syntax within statements containing an open parenthesis as described in [GH-463](https://github.com/cinchapi/concourse/issues/463) and [GH-139](https://github.com/cinchapi/concourse/issues/139).
+* Fixed a bug that caused the `Strategy` framework to select the wrong execution path when looking up historical values for order keys. This caused a regression in the performance for relevant commands.
+* Added `DEBUG` logging that provides details on the execution path chosen for each lookup.
+* Fixed a bug that caused `Order`/`Sort` instructions that contain multiple clauses referencing the same key to drop all but the last clause for that key.
+* Fixed a bug that caused the `concourse export` CLI to not process some combinations of command line arguments properly.
+* Fixed a bug tha caused an error to be thrown when using the `max` or `min` function over an entire index as an operation value in a CCL statement.
+* Fixed several corner case bugs with Concourse's arithmetic engine that caused the `calculate` functions to 1) return inaccurate results when aggregating numbers of different types and 2) inexplicably throw an error when a calculation was performed on data containing `null` values.
+
+#### Version 0.11.0 (March 4, 2022)
+
+##### BREAKING CHANGES
+There is only **PARTIAL COMPATIBILITY** between 
+* an `0.11.0+` client and an older server, and 
+* a `0.11.0+` server and an older client.
+
+Due to changes in Concourse's internal APIs,
+* An older client will receive an error when trying to invoke any `audit` methods on a `0.11.0+` server.
+* An older server will throw an error message when any `audit` or `review` methods are invoked from an `0.11.0+` client. 
+
+##### Storage Format Version 3
+* This version introduces a new, more concise storage format where Database files are now stored as **Segments** instead of Blocks. In a segment file (`.seg`), all views of indexed data (primary, secondary, and search) are stored in the same file whereas a separate block file (`.blk`) was used to store each view of data in the v2 storage format. The process of transporting writes from the `Buffer` to the `Database` remains unchanged. When a Buffer page is fully transported, its data is durably synced in a new Segment file on disk.
+* The v3 storage format should reduce the number of data file corruptions because there are fewer moving parts.
+* An upgrade task has been added to automatically copy data to the v3 storage format.
+	* The upgrade task will not delete v2 data files, so be mindful that **you will need twice the amount of data space available on disk to upgrade**. You can safely manually delete the v2 files after the upgrade. If the v2 files remain, a future version of Concourse may automatically delete them for you.
+* In addition to improved data integrity, the v3 storage format brings performance improvements to all operations because of more efficient memory management and smarter usage of asynchronous work queues.
+
+##### Atomic Commit Timestamps
+All the writes in a committed `atomic operation` (e.g. anything from primitive atomics to user-defined `transactions`) will now have the **same** version/timestamp. Previously, when an atomic operation was committed, each write was assigned a distinct version. But, because each atomic write was applied as a distinct state change, it was possible to violate ACID semantics after the fact by performing a partial undo or partial historical read. Now, the version associated with each write is known as the **commit version**. For non-atomic operations, autocommit is in effect, so each write continues to have a distinct commit version. For atomic operations, the commit version is assigned when the operation is committed and assigned to each atomic write. As a result, all historical reads will either see all or see none of the committed atomic state and undo operations (e.g. `clear`, `revert`) will either affect all or affect none of the commited atomic state.
+
+##### Optimizations
+* The storage engine has been optimized to use less memory when indexing by de-duplicating and reusing equal data components. This drastically reduces the amount of time that the JVM must dedicate to Garbage Collection. Previously, when indexing, the storage engine would allocate new objects to represent data even if equal objects were already buffered in memory.
+* We switched to a more compact in-memory representation of the `Inventory`, resulting in a reduction of its heap space usage by up to **97.9%**. This has an indirect benefit to overall performance and throughput by reducing memory contention that could lead to frequence JVM garbage collection cycles.
+* Improved user-defined `transactions` by detecting when an attempt is made to atomically commit multiple Writes that toggle the state of a field (e.g. `ADD name as jeff in 1`, `REMOVE name as jeff in 1`, `ADD name as jeff in 1`) and only committing at most one equal Write that is required to obtain the intended state. For example, in the previous example, only 1 write for `ADD name as jeff in 1` would be committed.
+
+##### Performance
+* We improved the performance of commands that sort data by an average of **38.7%**. These performance improvements are the result of an new `Strategy` framework that allows Concourse Server to dynamically choose the most opitmal path for data lookups depending upon the entire context of the command and the state of storage engine. For example, when sorting a result set on `key1`, Concourse Server will now intelligently decide to lookup the values across `key1` using the relevant secondary index if `key1` is also a condition key. Alternatively, Concourse Server will decide to lookup the values across `key1` using the primary key for each impacted record if `key1` is also a being explicitly selected as part of the operation.
+* Search is drastically faster as a result of the improved memory management that comes wth the v3 storage format as well as some other changes to the way that search indexes are read from disk and represented in memory. As a result, search performance is up-to **95.52%** faster on real-world data.
+
+##### New Functionality
+* Added `trace` functionality to atomically locate and return all the incoming links to one or more records. The incoming links are represented as a mapping from `key` to a `set of records` where the key is stored as a `Link` to the record being traced.
+* Added `consolidate` functionality to atomically combine data from one or more records into another record. The records from which data is merged are cleared and all references to those cleared records are replaced with the consolidated record on the document-graph.
+* Added the `concourse-export` framework which provides the `Exporter` construct for building tools that print data to an OutputStream in accordance with Concourse's multi-valued data format (e.g. a key mapped to multiple values will have those values printed as a delimited list). The `Exporters` utility class contains built-in exporters for exporting within CSV and Microsoft Excel formats.
+* Added an `export` CLI that uses the `concourse-export` framework to export data from Concourse in CSV format to STDOUT or a file.
+* For `CrossVersionTest`s, as an alternative to using the `Versions` annotation., added the ability to define test versions in a no-arg static method called `versions` that returns a `String[]`. Using the static method makes it possible to centrally define the desired test versions in a static variable that is shared across test classes.
+* The `server` variable in a `ClientServerTest` (from the `concourse-ete-test-core` framework) now exposes the server configuration from the `prefs()` method to facilitate programatic configuration management within tests.
+* Added the ability to configure the location of the access credentials file using the new `access_credentials_file` preference in `concourse.prefs`. This makes it possible to store credentials in a more secure directory that is also protected againist instances when the `concourse-server` installation directory is deleted. Please note that changing the value of `access_credentials_file` does not migrate existing credentials. By default, credentials are still stored in the `.access` within the root of the `concourse-server` installation directory.
+* Added a separate log file for upgrade tasks (`log/upgrade.log`).
+* Added a mechanism for failed upgrade tasks to automatically perform a rollback that'll reset the system state to be consistent with the state before the task was attempted.
+* Added `PrettyLinkedHashMap.of` and `PrettyLinkedTableMap.of` factory methods that accept an analogous Map as a parameter. The input Map is lazily converted into one with a pretty `toString` format on-demand. In cases where a Map is not expected to be rendered as a String, but should be pretty if it is, these factories return a Map that defers the overhead of prettification until it is necessary. 
+
+##### CCL Support
+* Added support for specifying a CCL Function Statement as a selection/operation key, evaluation key (within a `Condition` or evaluation value (wthin a `Conditon`). A function statement can be provided as either the appropriate string form (e.g. `function(key)`, `function(key, ccl)`, `key | function`, etc) or the appropriate Java Object (e.g. `IndexFunction`, `KeyConditionFunction`, `ImplicitKeyRecordFunction`, etc). The default behaviour when reading is to interpret any string that looks like a function statement as a function statement. To perform a literal read of a string that appears to be a function statement, simply wrap the string in quotes. Finally, a function statement can never be written as a value.
+
+##### Experimental Features
+
+###### Compaction
+* Concourse Server can now be configured to compact data files in an effort to optimize storage and improve read performance. When enabled, compaction automatically runs continuously in the background without disrupting data consistency or normal operations (although the impact on operational throughput has yet to be determined). The initial rollout of compaction is intentionally conservative (e.g. the built-in strategy will likely only make changes to a few data files). While this feature is experimental, there is no ability to tune it, but we plan to offer additional preferences to tailor the behaviour in future releases.
+* Additionally, if enabled, performing compaction can be **suggested** to Concourse Server on an adhoc basis using the new `concourse data compact` CLI.
+  * Compaction can be enabled by setting the `enable_compaction` preference to `true`. If this setting is `false`, Concourse Server will not perform compaction automatically or when suggested to do so.
+
+###### Search Caching 
+* Concouse Server can now be configured to cache search indexes. This feature is currently experimental and turned off by default. Enabling the search cache will further improve the performance of repeated searches by up to **200%**, but there is additional overhead that can slightly decrease the throughput of overall data indexing. Decreased indexing throughput may also indirectly affect write performance.
+  * The search cache can be enabled by setting the `enable_search_cache` preference to `true`.
+
+###### Verify by Lookup
+* Concourse Server can now be configured to use special **lookup records** when performing a `verify` within the `Database`. In theory, the Database can respond to verifies faster when generating a lookup record because fewer irrelevant revisions are read from disk and processed in memory. However, lookup records are not cached, so repeated attempts to verify data in the same field (e.g. a counter whose value is stored against a single locator/key) or record may be slower.
+  * Verify by Lookup can be enabled by setting the `enable_verify_by_lookup` preference to `true`.
+
+##### API Breaks and Deprecations
+* Upgraded to CCL version `3.1.1`. Internally, the database engine has switched to using a `Compiler` instead of a `Parser`. As a result, the Concourse-specific `Parser` has been deprecated.
+* **It it only possible to upgrade to this version from Concourse `0.10.6+`. Previously, it was possible to upgrade to a new version of Concourse from any prior version.**
+* Deprecated the `ByteBuffers` utility class in favor of the same in the `accent4j` library.
+* Deprecated `PrettyLinkedHashMap.newPrettyLinkedHashMap` factory methods in favor of `PrettyLinkedHashMap.create`.
+* Deprecated `PrettyLinkedHashMap.setKeyName` in favor of `PrettyLinkedHashMap.setKeyColumnHeader`
+* Deprecated `PrettyLinkedHashMap.setValueName` in favor of `PrettyLinkedHashMap.setValueColumnHeader`
+* Deprecated `PrettyLinkedTableMap.setRowName` in favor of `PrettyLinkedHashMap.setIdentifierColumnHeader`
+* Deprecated `PrettyLinkedTableMap.newPrettyLinkedTableMap` factory methods in favor of `PrettyLinkedTableMap.create`
+* Deprecated the `Concourse#audit` methods in favor of `Concourse#review` ones that take similar parameters. A `review` returns a `Map<Timestamp, List<String>>` instead of a `Map<Timestamp, String>` (as is the case with an `audit`) to account for the fact that a single commit timestamp/version may contain multiple changes.
+
+##### Bug Fixes
+* Fixed a bug that caused the system version to be set incorrectly when a newly installed instance of Concourse Server (e.g. not upgraded) utilized data directories containing data from an older system version. This bug caused some upgrade tasks to be skipped, placing the system in an unstable state.
+* Fixed a bug that made it possible for Database operations to unexpectedly fail in the rare cases due to a locator mismatch resulting from faulty indexing logic.
+* Fixed a bug in the serialization/deserialization logic for datasets passed between Concourse Server and plugins. This bug caused plugins to fail when performing operations that included non-trivial datasets.
+* Fixed a bug that caused datasets returned from Concourse Server to a plugin to have incorrect missing data when `invert`ed.
+
+#### Version 0.10.6 (September 9, 2021)
+
+##### Removed limit on Block file sizes
+* Added support for storing data in `Block` files that are larger than `2147483647` bytes (e.g. ~2.147GB) and fixed bugs that existed because of the previous limitation:
+  * If a mutable `Block` exceeded the previous limit in memory it was not synced to disk and the storage engine didn't provide an error or warning, so indexing continued as normal. As a result, there was the potential for permanent data loss. 
+  * When a mutable Block failed to sync in the manner described above, the data held in the Block remained completely in memory, resulting in a memory leak.
+* To accommodate the possibility of larger Block files, the `BlockIndex` now records position pointers using 8 bytes instead of 4. As a result, all Block files must be reindexed, which is automatically done when Concourse Server starts are new installation or upgrade.
+
+##### Eliminated risks of data inconsistency caused by premature shutdown
+* Fixed the logic that prevents duplicate data indexing when Concourse Server prematurely shuts down or the background indexing job terminates because of an unexpected error. The logic was previously implemented to address [CON-83](https://cinchapi.atlassian.net/browse/CON-83), but it relied on data values instead of data versions and was therefore not robust enough to handle corner cases descried in [GH-441](https://github.com/cinchapi/concourse/issues/441) and [GH-442](https://github.com/cinchapi/concourse/issues/442).
+  * A `concourse data repair` CLI has been added to detect and remediate data files that are corrupted because of the abovementioned bugs. The CLI can be run at anytime. If no corrupt data files are detected, the CLI has no effect.
+  * Upon upgrading to this version, as a precuation, the CLIs routine is run for each environment.  
+
+##### Other
+* Fixed a bug that caused the default `log_level` to be `DEBUG` instead of `INFO`.
+ 
+#### Version 0.10.5 (August 22, 2020)
+* Fixed a bug where sorting on a navigation key that isn't fetched (e.g. using a navigation key in a `find` operation or not specifying the navigation key as an operation key in a `get` or `select` operation), causes the results set to be returned in the incorrect order.
+* Upgraded CCL version to `2.6.3` in order to fix a parsing bug that occurred when creating a `Criteria` containing a String or String-like value with a whitespace or equal sign (e.g. `=`) character.
+* Fixed a bug that made it possible to store circular links (e.g. a link from a record to itself) when atomically adding or setting data in multiple records at once.
+* Fixed a race condition that occurred when multiple client connections logged into a non-default environment at the same time. The proper concurrency controls weren't in place, so the simultaneous connection attempts, in many cases, caused the Engine for that environment to be initialized multiple times. This did not cause any data duplication issues (because only one of the duplicate Engines would be recognized at any given time), but it could cause an `OutOfMemoryException` if that corresponding environment had a lot of metadata to be loaded into memory during intialization.
+
+#### Version 0.10.4 (December 15, 2019)
+* Added support for using the `LIKE`, `NOT_LIKE` and `LINKS_TO` operators in the `TObject#is` methods. 
+* Fixed a bug that made it possible for a `ConnectionPool` to refuse to accept the `release` of a previously issued `Concourse` connection due to a race condition.
+* Fixed a bug that made it possible for Concourse to violate ACID consistency when performing a concurrent write to a key/record alongside a wide read in the same record.
+* Fixed a bug that caused inconsistencies in the intrinsic order of the result set records from a `find` operation vs a `select` or `get` operation.
+
+#### Version 0.10.3 (November 12, 2019)
+* Fixed an issue where the `Database` unnecessarily loaded data from disk when performing a read for a `key` in a `record` after a previous read for the entire `record` made the desired data available in memory.
+* Fixed a minor bug that caused the Database to create unnecessary temporary directories when performing a reindex.
+* The `Criteria` builder now creates a `NavigationKeySymbol` for navigation keys instead of a `KeySymbol`.
+* Fixed a bug that caused `Convert#stringToJava` to throw an `NumberFormatException` when trying to convert numeric strings that appeared to be numbers outside of Java's representation range. As a result of this fix, those kinds of values will remain as strings.
+* Added a `ForwardingConcourse` wrapper that can be extended by subclasses that provide additional functionality around a subset of Concourse methods.
+* Fixed a bug that prevent a custom `ConnectionPool` using a custom `Concourse` instance (e.g. one that extends `ForwardingConcourse`) from returning a connection of the correct class. As a result of this change, the `ConnectionPool` constructors that accept explicit Concourse connection parameters have been deprecated in favor of one that takes a `Supplier` of Concourse connections.
+* Fixed a bug that caused `TObject#compareTo` to return logically inconsistent results relative to `TObject#equals`. Previously, comparing `TObjects` with type `STRING` occurred in a case insensitive manner whereas the `equals` evaluation was case sensitive. Now, the `compareTo` method is case sensitive.
+* Added the ability to compare `TObjects` in a case insensitive manner.
+* Fixed a bug that made it possible for storage engine to return inaccurate results for `REGEX` and `NOT_REGEX` queries if matching values had different case formats.
+* Fixed a bug that caused historical queries to incorrectly return logically different results compared to present state queries if matching values had different case formats.
+* Fixed a bug that made it possible for reads within the `Buffer` to cause write lock starvation and resource exhaustion; preventing any further writes from occurring and generating a backlog of reads that never terminated.
+
+#### Version 0.10.2 (August 24, 2019)
+* Fixed a bug that caused an error to be thrown when creating a `Criteria` containing a navigation key using the `Criteria#parse` factory.
+* Added an option to limit the length of substrings that are indexed for fulltext search. It is rare to add functionality in a patch release, but this improvement was needed to alleviate Concourse deployments that experience `OutOfMemory` exceptions because abnormally large String values are stuck in the Buffer waiting to be indexed. This option is **turned off by default** to maintain consistency with existing Concourse expectations for fulltext indexing. The option can be enabled by specifying a positive integer value for the newly added `max_search_substring_length` preference. When a value is supplied, the Storage Engine won't index any substrings longer than the provided value for any word in a String value.
+* Made internal improvements to the search indexing algorithm to reduce the number of itermediary objects created which should decrease the number of garbage collection cycles that are triggered.
+* Fixed a bug that caused the Engine to fail to accumulate metadata stats for fulltext search indices. This did not have any data correctness or consistency side-effects, but had the potential to make some search-related operations inefficient.
+* Fixed a bug that made it possible for the Database to appear to lose data when starting up after a crash or unexpected shutdown. This happened because the Database ignored data in Block files that erroneously appeared to be duplicates. We've fixed this issue by improving the logic and workflow that the Database uses to test whether Block files contain duplicate data.
+* Fixed a regression introduced in version `0.10.0` that made it possible for the Database to ignore errors that occurred when indexing writes. When indexing errors occur, the Database creates log entries and stops the indexing process, which is the behaviour that existed prior to version `0.10.0`.
+* Fixed a bug that made it possible for fatal indexing errors to occur when at least two writes were written to the same `Buffer` page for the same key with values that have different types (i.e. `Float` vs `Integer`) but are *essentially* equal (i.e. `18.0` vs `18`). In accordance with Concourse's weak typing system, values that are *essentially* the same will be properly indexed and queryable across associated types. This change **requires a reindex of all block files which is automatically done when upgrading from a previous version**.
+* Fixed a bug that causes the `ManagedConcourseServer` in the `concourse-ete-test-core` framework to take longer than necessary to allow connections in `ClientServerTest` cases.
+
+#### Version 0.10.1 (August 6, 2019)
+* Fixed a regression that caused an error when attempting an action with a CCL statement containing an unquoted string value with one or more periods.
+
+#### Version 0.10.0 (August 3, 2019)
+
+##### BREAKING CHANGES
+There is only **PARTIAL COMPATIBILITY** between 
+* an `0.10.0+` client and an older server, and 
+* a `0.10.0+` server and an older client.
+
+Due to changes in Concourse's internal APIs,
+* Older client will receive an error when trying to invoke any navigate or calculation methods on a `0.10.0+` server.
+* Older servers will throw an error message when any navigate or calculation methods are invoked from an `0.10.0+` client. 
+
+##### New Features
+
+###### Sorting
+Concourse Server now (finally) has the ability to sort results!
+* A result set that returns data from multiple records (across any number of keys) can be sorted.
+* Concourse drivers now feature an `Order` framework that allows the client to specify how Concourse Server should sort a result set. An `Order` can be generated using an intuitive builder chain.
+* An Order can be specified using values for any keys; regardless of whether those keys are explictly fetched or not.
+* A timestamp can optionally be associated with each order component.
+	* **NOTE**: If no timestamp is specified with an order component, Concourse Server uses the value that is explicitly fetched in the request OR it looks up the value using the selection timestamp of the request. If there is no selection timestamp, the lookup returns the current value(s).
+* A direction (ascending or descending) can optionally be associated with each order component.
+	* **NOTE**: The default direction is *ascending*.
+* An Order can contain an unlimited number of components. If, after evaluating all the order components, two records still have the same sort order, Concourse Server automatically sorts based on the record id.
+* If a `null` value is encountered when evaluating an order components, Concourse Server pushes the record containing that `null` value to the "end" of the result set regardless of the order component's direction.
+
+###### Pagination
+Concourse Server now (finally) has the ability to page through results!
+* A result set that returns data from multiple records (across any number of keys) can be paginated.
+* Concourse drviers now feature a `Page` object that allows the client to specify how Concourse Server should paginate a result set. A `Page` is an abstraction for offset/skip and limit parameters. The `Page` class contains various factory methods to offset and limit a result set using various intuitive notions of pagination.
+
+###### Navigable Data Reads
+* You can now traverse the document graph by specifying one ore more *navigation keys* in the following read methods:
+	* browse
+	* calculate
+	* get
+	* select
+* Reading a navigation key using `get` or `select` is intended to repleace the `navigate` methods.
+* When reading a navigation key in the context of one or more records, the root record (e.g the record from which the document-graph traversal starts) is mapped to the values that are retrieved from the destination records. In the `navgiate` methods, the destination record is associated with the destination value(s).
+	* For example, assume record `1` is linked to record `2` on the `friends` key. Record `2` contains the value `Jeff` for the `name` key...
+	* if you `select("friends.name", 1)`, the return value will map `1` to `[Jeff]` whereas the return value of `navigate("friends.name", 1)` maps `2` to `[Jeff]`. 
+	
+###### Navigable Criteria
+* You can now use navigation keys in `Criteria` objects or `ccl` statements that are passed to the `find`, `get` and `select` methods.
+
+###### ETL 
+* Added the `com.cinchapi.concourse.etl` package that contains data processing utilities:
+	*  A `Strainer` can be used to process a `Map<String, Object>` using Concourse's data model rules. In particular, the `Strainer` encapsulates logic to break down top-level sequence values and process their elements individually.
+	* The `Transform` class contains functions for common data transformations. 
+
+###### Miscellaneous
+* Added an iterative connection builder that is accessible using the `Concourse.at()` static factory method.
+* Added the `com.cinchapi.concourse.valididate.Keys` utility class which contains the `#isWritable` method that determines if a proposed key can be written to Concourse.
+* Added `Parsers#create` static factory methods that accept a `Criteria` object as a parameter. These new methods compliment existing ones which take a CCL `String` and `TCriteria` object respectively.
+* Upgraded the `ccl` dependency to the latest version, which adds support for local criteria evaluation using the `Parser#evaluate` method. The parsers returned from the `Parsers#create` factories all support local evaluation using the function defined in the newly created `Operators#evaluate` utility.
+* Added support for remote debugging of Concourse Server. Remote debugging can be enabled by specifying a `remote_debugger_port` in `concourse.prefs`.
+* The `calculate` methods now throw an `UnsupportedOperationException` instead of a vague `RuntimeException` when trying to run calculations that aren't permitted (i.e. running an aggregation on a non-numeric index).
+
+##### Improvements
+* Refactored the `concourse-import` framework to take advantage of version `1.1.0+` of the `data-transform-api` which has a more flexible notion of data transformations. As a result of this change, the `Importables` utility class has been removed. Custom importers that extend `DelimitedLineImporter` can leverage the protected `parseObject` and `importLines` methods to hook into the extraction and import logic in a manner similar to what was possible using the `Importables` functions.
+* Refactored the `Criteria` class into an interface that is implemented by any language symbols that can be immediately transformed to a well-built criteria (e.g. `ValueState` and `TimestampState`). The primary benefit of this change is that methods that took a generic Object parameter and checked whether that object could be built into a `Criteria` have now been removed from the `Concourse` driver since that logic is automatically captured within the new class hiearchy. Another positive side effect of this change is that it is no longer necessary to explicitly build a nested `Criteria` when using the `group` functionality of the `Criteria` builder.
+* Improved the performance of querying certain Concourse Server methods from a plugin via `ConcourseRuntime` by eliminating unnecessary server-side calculations meant to facilitate analytics. These calculations will continue to be computed when the plugin receives the data from `ConcourseRuntime`.
+
+##### Bug Fixes
+* Fixed a bug that caused data imported from STDIN to not have a `__datasource` tag, even if the `--annotate-data-source` flag was included with the CLI invocation. 
+* Fixed a bug that allowed Concourse Server to start an environment's storage engine in a partially or wholly unreadable state if the Engine partially completed a block sync while Concourse Server was going through its shutdown routine. In this scenario, the partially written block is malformed and should not be processed by the Engine since the data contained in the malformed block is still contained in the Buffer. While the malformed block files can be safely deleted, the implemented fix causes the Engine to simply ignore them if they are encountered upon initialization. 
+* Added checks to ensure that a storage Engine cannot transport writes from the Buffer to the Database while Concourse Server is shutting down.
+* Fixed a bug that allow methods annotated as `PluginRestricted` to be invoked if those methods were defined in an ancestor class or interface of the invokved plugin.
+* Fixed a bug introduced by [JEF-245](https://openjdk.java.net/jeps/245) that caused Concourse Server to fail to start on recent versions of Java 8 and Java 9+ due to an exploitation of a JVM bug that was used to allow Concourse Server to specify native thread prioritization when started by a non-root user. As a result of this fix, Concourse Server will only try to specify native thread prioritization when started by a root user.
+
+##### Deprecated and Removed Features
+* Removed the `Strings` utility class in favor of `AnyStrings` from `accent4j`.
+* Removed the `StringSplitter` framework in favor of the same from `accent4j`.
+* Deprecated `Criteria#getCclString` in favor of `Criteria#ccl`.
+* The `navigate` methods in the client drivers have been deprecated in favor of using `select`/`get` to traverse the document-graph.
+
+#### Version 0.9.6 (February 16, 2019)
+* Fixed a bug that caused a `ParseException` to be thrown when trying to use a `Criteria` object containing a string value wrapped in single or double quotes out of necessity (i.e. because the value contained a keyword). This bug happened because the wrapping quotes were dropped by Concourse Server when parsing the `Criteria`.
+* Fixed a bug where the CCL parser failed to handle some Unicode quote characters.
+
+#### Version 0.9.5 (December 30, 2018)
+* Fixed a bug where some of the `ManagedConcourseServer#get` methods in the `concourse-ete-test-core` package called the wrong upstream method of the Concourse Server instance under management. This had the effect of causing a runtime `ClassCastException` when trying to use those methods.
+* Fixed a bug that caused ambiguity and erroneous dispatching for query methods (e.g. #get, #navigate and #select) that have different signatures containing a `long` (record) or generic `Object` (criteria) parameter in the same position. This caused issues when a `Long` was provided to the method that expected a `long` because the dispatcher would route the request that expected an `Object` (criteria) parameter.
+* Fixed a bug in the `concourse-ete-test-core` framework where `Timestamp` objects returned from the managed server were not translated to `Timestamp` type from the test application's classpath.
+
+#### Version 0.9.4 (October 31, 2018)
+* Context has been added exceptions thrown from the `v2` `ccl` parser which makes it easier to identify what statements are causing issues.
+
+#### Version 0.9.3 (October 7, 2018)
+* Fixed a bug that caused a `NullPointerException` to be thrown when trying to `set` configuration data in `.prefs` files.
+
+#### Version 0.9.2 (September 3, 2018)
+* Deprecated the `forGenericObject`, `forCollection`, `forMap` and `forTObject` TypeAdapter generators in the `TypeAdapters` utility class in favor of `primitiveTypesFactor`, `collectionFactory` and `tObjectFactory` in the same class, each of which return a `TypeAdapterFactory` instead of a `TypeAdapter`. Going forward, please register these type adapter factories when building a `Gson` instance for correct Concourse-style JSON serialization semantics.
+* Upgraded to `ccl` version `2.4.1` to capture fix for an bug that caused both the v1 and v2 parsers to mishandle numeric String and Tag values. These values were treated as numbers instead of their actual type. This made it possible for queries containing those values to return inaccurate results.
+* Added the associated key to the error message of the Exception that is thrown when attempting to store a blank value.
+* Fixed a regression that caused programmatic configuration updates to no longer persist to the underlying file.
+* The `Timestamp` data type now implements the `Comparable` interface.
+
+#### Version 0.9.1 (August 12, 2018)
+
+##### Enhancements
+* Upgraded client and server configuration management and added support for incremental configuration overrides. Now
+	* Server preferences defined in `conf/concourse.prefs` can be individually overriden in a `conf/concourse.prefs.dev` file (previously override preferences in the .dev file had to be done all or nothing). 
+	* Both server and client preferences can be individually overriden using environment variables that are capitalized and prefixed with `CONCOURSE_`. For example, you can override the `heap_size` preference with an environment variable named `CONCOURSE_HEAP_SIZE`.
+* Added Docker image [https://hub.docker.com/r/cinchapi/concourse](https://hub.docker.com/r/cinchapi/concourse). See [https://docs.cinchapi.com/concourse/quickstart](https://docs.cinchapi.com/concourse/quickstart) for more information.
+
+##### Bug Fixes
+* Fixed a bug that caused Concourse to improperly interpret values written in scientific notation as a `STRING` data type instead of the appropriate number data type.
+* Fixed a bug in the logic that Concourse Server used to determine if the system's data directories were inconsistent. Because of the bug, it was possible to put Concourse in an inconsistent state from which it could not automatically recover by changing either the `buffer_directory` or `database_directory` and restarting Concourse Server. The logic has been fixed, so Concourse now accurately determines when the data directories are inconsistent and prevents the system from starting.
+* Fixed a bug that caused an exception to be thrown when trying to `jsonify` a dataset that contained a `Timestamp`.
+
+#### Version 0.9.0 (May 30, 2018)
+
+##### Vulnerabilities
+* Fixed a vulnerability that made it possible for a malicious plugin archive that contained entry names with path traversal elements to execute arbitrary code on the filesystem, if installed. This vulnerability, which was first disclosed by the [Snyk Security Research Team](https://snyk.io/docs/security), existed because Concourse did not verify that an entry, potentially extracted from a zipfile, would exist within the target directory if actually extracted. We've fixed this vulnerability by switching to the [zt-zip](https://github.com/zeroturnaround/zt-zip) library for internal zip handling. In addition to having protections against this vulnerability, `zt-zip` is battle-tested and well maintained by [ZeroTurnaround](https://zeroturnaround.com/). Thanks again to the Snyk Security Research Team for disclosing this vulnerability.
+
+##### Security Model
+* Added a notion of *user roles*. Each user account can either have the `ADMIN` or `USER` role. `ADMIN` users are permitted to invoke management functions whereas accounts with the `USER` role are not.
+	* All previously existing users are assigned the `ADMIN` role on upgrade. You can change a user's role using the `users` CLI.
+	* The `users create` command now requires a role to be provided interactively when prompted or non-interactively using the `--set-role` parameter.
+* Added an `edit` option to the `users` CLI that allows for setting a user's role and/or changing the password. The password can also still be changed using the `password` option of the `users` CLI.
+* Removed a constraint the prevented the default `admin` user account from being deleted.
+* Added additional logging around the upgrade process.
+* Fixed a bug that prevented upgrade tasks from being run when upgrading a Concourse Server instance that was never started prior to the upgrade.
+* Upgraded some internal libraries to help make server startup time faster.
+* Fixed a bug in `concourse-driver-java` that caused the `navigate` functions to report errors incorrectly.
+* Added *user permissions*. Each non-admin user account can be granted permission to `READ` or `WRITE` data within a specific environment:
+	* Permissions can be granted and revoked for a non-admin role user by a user who has the admin role.
+	* Permissions are granted on a per environment basis.
+	* A user with `READ` permission can read data from an environment but cannot write data.
+	* A user with `WRITE` permission can read and write data in an environment.
+	* Users with the admin role implicitly have `WRITE` permission to every environment.
+	* If a user's role is downgraded from admin to user, she will have the permissions she has before being assigned the admin role.
+	* If a user attempts to invoke a function for which she doesn't have permission, a `PermissionException` will be thrown, but the user's session will not terminate.
+	* A user with the admin role cannot have any of her permissions revoked.
+	* Plugins automatically inherit a user's access (based on role and permission).
+	* Service users that operate on behalf of plugins have `WRITE` access to every environment.
+
+##### Data Types
+* Added a `Criteria#at(Timestamp)` method to transform any `Criteria` object into one that has all clauses pinned to a specific `Timestamp`.
+* Added a static `Criteria#parse(String)` method to parse a CCL statement and produce an analogous `Criteria` object.
+* Streamlined the logic for server-side atomic operations to unlock higher performance potential.
+* Added [short-circuit evaluation](https://en.wikipedia.org/wiki/Short-circuit_evaluation) logic to the query parsing pipeline to improve performance.
+* Added a `TIMESTAMP` data type which makes it possible to store temporal values in Concourse.
+	* The `concourse-driver-java` API uses the [`Timestamp`](https://docs.cinchapi.com/concourse/api/java/com/cinchapi/concourse/Timestamp.html) class to represent `TIMESTAMP` values. Please note that hallow `Timestamps` (e.g. those created using the `Timestamp#fromString` method cannot be stored as values). An attempt to do so will throw an `UnsupportedOperationException`.
+	* The `concourse-driver-php` uses the [`DateTime`](http://php.net/manual/en/class.datetime.php) class to represent `TIMESTAMP` values.
+	* The `concourse-driver-python` uses the [`datetime`](https://docs.python.org/2/library/datetime.html) class to represent `TIMESTAMP` values.
+	* The `concourse-driver-ruby` uses the [`DateTime`](https://ruby-doc.org/stdlib-2.3.1/libdoc/date/rdoc/DateTime.html) class to represent `TIMESTAMP` values.
+	* The Concourse REST API allows specifying `TIMESTAMP` values as strings by prepending and appending a `|` to the value (e.g. `|December 30, 1987|`). It is also possible to specify a formatting pattern after the value like `|December 30, 1987|MMM dd, yyyy|`.
+* Added a `Timestamp#isDateOnly` method that returns `true` if a `Timestamp` does not contain a relevant temporal component (e.g. the `Timestamp` was created from a date string instead of a datetime string or a timestring).
+
+##### Performance
+* Upgraded the CCL parser to a newer and more efficient version. This change will yield general performance improvements in methods that parse CCL statements during evaluation.
+
+##### Developer Experience
+* The test Concourse instance used in a `ClientServerTest` will no longer be automatically deleted when the test fails. This will allow for manual inspection of the instance when debugging the test failure.
+* Added additional logging for plugin errors.
+* Added a `manage` interface to the driver APIs. This interface exposes a limited number of management methods that can be invoked programatically.
+
+##### Bug Fixes
+* Fixed a bug that caused the server to fail to start if the `conf/stopwords.txt` configuration file did not exist.
+* Fixed a bug that caused `PrettyLinkedHashMap#toString` to render improperly if data was added using the `putAll` method.
+* Fixed a bug in the `ConcourseImportDryRun#dump` method that caused the method to return an invalid JSON string.
+* Fixed a bug where a users whose access had been `disabled` was automatically re-enabled if her password was changed.
+
+##### Miscellaneous
+* Added the ability for the storage engine to track stats and metadata about database structures.
+
+#### Version 0.8.2 (April 17, 2018)
+* Fixed a bug in the `ManagedConcourseServer#install` method that caused the server installation to randomly fail due to race conditions. This caused unit tests that extended the `concourse-ete-test-core` framework to intermittently fail.
+
+#### Version 0.8.1 (March 26, 2018)
+* Fixed a bug that caused local CCL resolution to not work in the `findOrInsert` methods.
+* Fixed an issue that caused conversion from string to `Operator` to be case sensitive.
+* Fixed a bug that caused the `putAll` method in the map returned from `TrackingMultimap#invert` to store data inconsistently.
+* Added better error handling for cases when an attempt is made to read with a value with a type that is not available in the client's version.
+* Fixed a bug that caused Concourse Server to unreliably stream data when multiple real-time plugins were installed.
+* Fixed a bug that caused Concourse Server to frequently cause high CPU usage when multiple real-time plugins were installed.
+* Added an **isolation** feature to the `ImportDryRunConcourse` client (from the `concourse-import` framework). This feature allows the client to import data into an isolated store instead of one shared among all instances. This functionality is not exposed to the `import` CLI (because it isn't necessary), but can be benefical to applications that use the dry-run client to programmatically preview how data will be imported into Concourse.
+* Added an implementation for the `ImportDryRunConcourse#describe` method.
+
+#### Version 0.8.0 (December 14, 2017)
+* Added a `count` aggregation function that returns the number of values stored
+	* across a key,
+	* for a key in a record, or
+	* for a key in multiple records.
+* Added a `max` aggregation function that returns the largest numeric value stored
+	* across a key,
+	* for a key in a record, or
+	* for a key in multiple records.
+* Added a `min` aggregation function that returns the smallest numeric value stored
+	* across a key,
+	* for a key in a record, or
+	* for a key in multiple records.
+* Moved the `ccl` parsing logic into a [separate library](https://github.com/cinchapi/ccl) to make the process portable to plugins and other applications.
+* Fixed some bugs that could have caused incorrect evaluation of `select(criteria)`, `find(criteria)` and related methods in some cases.
+* Added a `TObject#is(operator, values...)` method so plugins can perform local operator based comparisons for values returned from the server.
+
+#### Version 0.7.3 (December 14, 2017)
+* Fixed a bug that caused the temporal `average` and `sum` calculations to fail if the `timestamp` parameter was generated from a `String` instead of `long`.
+* Fixed a couple of bugs that made it possible for Concourse Server to pass blank or unsanitized environment names to plugins during method invocations.
+* Fixed a bug that caused `Criteria` objects to be improperly serialized/deserialized when passed to plugin methods as arguments or used as return values.
+
+#### Version 0.7.2 (November 26, 2017)
+* Added more detailed information to the server and plugin log files about plugin errors.
+* Fixed a bug where `TrackingMultimap#percentKeyDataType` returned `NaN` instead of `0` when the map was empty.
+* Added a `memoryStorage` option to the `PluginStateContainer` class.
+
+#### Version 0.7.1 (November 22, 2017)
+* Fixed a bug that caused an error in some cases of importing or inserting data that contained a value of `-`.
+* Added better error message for TApplicationException in CaSH.
+
+#### Version 0.7.0 (November 19, 2017)
+* Added `navigate` methods that allow selecting data based on link traversal. For example, it is possible to select the names of the friends of record 1's friends by doing
+
+		navigate "friends.friends.name", 1
+
+* Re-implemented the `users` CLI to provide extensible commands. Now the `users` CLI will respond to:
+	1. `create` - create a new user
+	2. `delete` - delete an existing user
+	3. `enable` - restore access to a suspended user
+	4. `password` - change a user's password
+	5. `sessions` - list the current user sessions
+	6. `suspend` - revoke access for a user
+
+* Changed the `envtool` CLI to the `environments` CLI with extensible commands. The `environments` CLI will respond:
+	1. `list` - list the Concourse Server environments
+
+* Changed the `dumptool` CLI to the `data` CLI with extensible commands. The `data` CLI will respond to:
+	1. `dump` - dump the contents of a Concourse Server data file
+	2. `list` - list the Concourse Server data files
+
+* Added a `CompositeTransformer` to the `concourse-import` framework that invokes multiple transformers in declaration order.
+* Added a `Transformers` utility class to the `concourse-import` framework API.
+* Fixed a bug that caused the loss of order in plugin results that contained a sorted map.
+* Added a `--dry-run` flag to the `import` CLI that will perform a test import of data in-memory and print a JSON dump of what data would be inserted into Concourse.
+* Added support for installing multiple plugins in the same directory using the `concourse plugin install </path/to/directory>` command.
+* Implemented `describe()` and `describe(time)` methods to return all the keys across all records in the database.
+* Fixed a bug where the `browse(keys, timestamp)` functionality would return data from the present state instead of the historical snapshot.
+* Fixed an issue that caused plugins to use excessive CPU resources when watching the liveliness of the host Concourse Server process.
+* Added a bug fix that prevents service tokens from auto-expiring.
+* Added a `ps` command to the `plugins` CLI to display information about the running plugins.
+* Fixed a bug that caused the `average(key)` method to return the incorrect result.
+* Fixed a bug that caused calculations that internally performed division to prematurely round and produce in-precise results.
+* Fixed a bug that caused the editing and deleting an existing user with the `users` CLI to always fail.
+* Added support for defining custom importers in `.jar` files.
+* Detect when the service is installed in an invalid directory and fail appropriately.
+* Fixed a security bug that allowed the `invokePlugin` method to not enforce access controls properly.
+* Fixed a bug that caused management CLIs to appear to fail when they actually succeeded.
+* Improved the performance of the `ResultDataSet#put` method.
+* Fixed a bug in the implementation of `ObjectResultDataset#count`.
+* Deprecated `Numbers#isEqual` and `Numbers#isEqualCastSafe` in favor of better names `Numbers#areEqual` and `Numbers#areEqualCastSafe`.
+* Added support for getting the min and max keys from a `TrackingMultimap`.
+* Added an `ImmutableTrackingMultimap` class.
+* Fixed a bug in the `TrackingMultimap#delete` method.
+* Fixed the CPU efficiency of the JavaApp host termination watcher.
+* Fix bug that caused JavaApp processes to hang if they ended before the host was terminated.
+* Added database-wide `describe` method.
+
+#### Version 0.6.0 (March 5, 2017)
+* Added `calculate` interface to the `java` driver to perform aggregations.
+* Added a `sum` aggregation function.
+* Added an `average` aggregation function.
+* Switched to socket-based (instead of shared memory based) interprocess communication between Concourse Server and plugins.
+* Assigned meaningful process names to plugins.
+* Added a System-Id for each Concourse Server instance.
+* Fixed bugs in the `ObjectResultDataset` implementation.
+* Added an end-to-end testing framework for the plugin framework.
+* Fixed a bug that caused some query results to be case-sensitive.
+* Fixed a bug that caused some query results to have inconsistent ordering.
+* Upgraded support for parsing natural language timestamps.
+* Updated the usage method of the `concourse` init.d script.
+* Fixed a bug that caused `PluginContext` and `PluginRuntime` to return different directories for a plugin's data store.
+* Added a progress bar for the `plugin install` command.
+* Fixed a bug that caused `ConcourseRuntime` to mishandle plugin results.
+* Clarified the proper way to use plugin hooks.
+* Refactored the `plugin` management CLI.
+* Fixed a bug that allowed plugins to invoke server-side transaction methods ([CON-518](http://jira.cinchapi.com/browse/CON-518)).
+* Refactored the implementation of the `version` CLI.
+* Improved process forking framework.
+* Enabled console logging for plugins ([CON-514](http://jira.cinchapi.com/browse/CON-514)).
+* Made the `Transformer` interface in `concourse-import` framework a `FunctionalInterface`.
+* Added logic to plugins to signal to Concourse Server when initialization has completed.
+* Added functionality to get the host Concourse Server directory from the `import` CLI and server-side management CLIs.
+* Added support for defining custom importers in an `importers` directory within the Concourse Server instance directory.
+* Added a `--annotate-data-source` option to the `import` CLI that will cause imported records to have the name of the source file added to the `__datasource` key.
+* Added support for specifying the id of the record into which data should be inserted within the JSON blob that is passed to the `insert` method.
+* Added method to `TrackingMultimap` that measures the spread/dispersion of the contained data.
+* Fixed a race condition bug in the `concourse-ete-test` framework.
+* Fixed bug that caused a preference for using random ports outside the ephemeral range.
+* Changed the plugin configuration to no longer require setting `remote_debugger = on` to enable remote debugging; now it is sufficient to just specify the `remote_debugger_port` preference.
+
+#### Version 0.5.0 (November 3, 2016)
 
 ##### API Breaks
 * The `insert(json)` method now returns a `Set<Long>` instead of a `long`.
@@ -328,7 +778,7 @@
 * Improved build infrastructure.
 
 #### Version 0.2.0 (December 28, 2013)
-* Changed database storage model from one record per file to several revisions across blocks.
+* Changed database storage format from one record per file to several revisions across blocks (Storage Format Version 2).
 * Added CLI to dump buffer and block contents.
 * Added Concourse Action SHeLL (CaSH)
 * Added publishing of artifacts to maven central repo.

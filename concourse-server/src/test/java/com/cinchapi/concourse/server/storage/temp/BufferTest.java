@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -19,37 +19,36 @@ import java.io.File;
 import java.util.ConcurrentModificationException;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.junit.Assert;
-import org.junit.Ignore;
 import org.junit.Test;
 import org.mockito.Mockito;
 
 import com.cinchapi.common.base.TernaryTruth;
+import com.cinchapi.common.reflect.Reflection;
 import com.cinchapi.concourse.server.GlobalState;
 import com.cinchapi.concourse.server.io.FileSystem;
-import com.cinchapi.concourse.server.storage.PermanentStore;
+import com.cinchapi.concourse.server.storage.DurableStore;
 import com.cinchapi.concourse.server.storage.Store;
-import com.cinchapi.concourse.server.storage.temp.Buffer;
-import com.cinchapi.concourse.server.storage.temp.Limbo;
-import com.cinchapi.concourse.server.storage.temp.Write;
 import com.cinchapi.concourse.test.Variables;
 import com.cinchapi.concourse.time.Time;
 import com.cinchapi.concourse.util.Convert;
 import com.cinchapi.concourse.util.TestData;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
 
 /**
- * Unit tests for {@link Buffer}.
- * 
+ * Unit tests for {@link com.cinchapi.concourse.server.storage.temp.Buffer}.
+ *
  * @author Jeff Nelson
  */
 public class BufferTest extends LimboTest {
 
-    private static PermanentStore MOCK_DESTINATION = Mockito
-            .mock(PermanentStore.class);
+    private static DurableStore MOCK_DESTINATION = Mockito
+            .mock(DurableStore.class);
     static {
         // NOTE: The Buffer assumes it is transporting to a Database, but we
         // cannot mock that class with Mockito since it is final. Mocking the
@@ -129,8 +128,8 @@ public class BufferTest extends LimboTest {
         List<Write> writes = getWrites();
         int j = 0;
         for (Write write : writes) {
-            add(write.getKey().toString(), write.getValue().getTObject(), write
-                    .getRecord().longValue());
+            add(write.getKey().toString(), write.getValue().getTObject(),
+                    write.getRecord().longValue());
             Variables.register("write_" + j, write);
             j++;
         }
@@ -174,36 +173,11 @@ public class BufferTest extends LimboTest {
         long before = Time.now();
         while (!((Buffer) store).canTransport()) {
             before = Time.now();
-            add(TestData.getString(), TestData.getTObject(), TestData.getLong());
+            add(TestData.getString(), TestData.getTObject(),
+                    TestData.getLong());
         }
         thread.join(); // make sure thread finishes before comparing
         Assert.assertTrue(later.get() > before);
-    }
-
-    @Test
-    @Ignore
-    public void testOnDiskIterator() {
-        Buffer buffer = (Buffer) store;
-        int count = TestData.getScaleCount();
-        List<Write> expected = Lists.newArrayList();
-        for (int i = 0; i < count; ++i) {
-            Write write = Write.add(TestData.getSimpleString(),
-                    TestData.getTObject(), i);
-            buffer.insert(write);
-            expected.add(write);
-            Variables.register("expected_" + i, write);
-        }
-        buffer.stop();
-        Iterator<Write> it = Buffer.onDiskIterator(buffer.getBackingStore());
-        List<Write> stored = Lists.newArrayList();
-        int i = 0;
-        while (it.hasNext()) {
-            Write write = it.next();
-            stored.add(write);
-            Variables.register("actual_" + i, write);
-            ++i;
-        }
-        Assert.assertEquals(expected, stored);
     }
 
     @Test
@@ -243,13 +217,6 @@ public class BufferTest extends LimboTest {
     }
 
     @Test
-    public void testOnDiskIteratorEmptyDirectory() {
-        Buffer buffer = (Buffer) store;
-        Buffer.onDiskIterator(buffer.getBackingStore() + "/foo").hasNext();
-        Assert.assertTrue(true); // lack of exception means test passes
-    }
-
-    @Test
     public void testPageExpansion() {
         // NOTE: This test is designed to ensure that buffer pages can
         // automatically expand to accommodate a write that is larger than
@@ -267,4 +234,91 @@ public class BufferTest extends LimboTest {
         }
     }
 
+    @Test
+    public void testPercentVerifyScansAllWrites() {
+        Buffer buffer = (Buffer) store;
+        List<Write> stored = addRandomElementsToBufferAndList(buffer,
+                TestData.getScaleCount());
+        for (Write write : stored) {
+            buffer.verify(write.getKey().toString(),
+                    write.getValue().getTObject(),
+                    write.getRecord().longValue());
+        }
+        float percent = Reflection.call(buffer, "getPercentVerifyScans");
+        Assert.assertEquals(1.0f, percent, 0f);
+    }
+
+    @Test
+    public void testPercentVerifyScansSomeWrites() {
+        Buffer buffer = (Buffer) store;
+        int stored = 0;
+        int count = TestData.getScaleCount();
+        Set<Write> writes = Sets.newHashSet();
+        for (int i = 0; i < count; ++i) {
+            int seed = TestData.getInt();
+            Write write = null;
+            while (write == null || !writes.add(write)) {
+                write = TestData.getWriteAdd();
+            }
+            if(seed % 3 == 0) {
+                buffer.insert(write);
+                ++stored;
+            }
+            writes.add(write);
+        }
+        for (Write write : writes) {
+            buffer.verify(write.getKey().toString(),
+                    write.getValue().getTObject(),
+                    write.getRecord().longValue());
+        }
+        float percentVerifyScans = Reflection.call(buffer,
+                "getPercentVerifyScans");
+        float floor = (float) stored / writes.size();
+        Assert.assertTrue(percentVerifyScans >= floor);
+    }
+
+    @Test
+    public void testAsyncWritesToBuffer() {
+        GlobalState.BINARY_QUEUE.clear();
+        Buffer buffer = (Buffer) store;
+        int count = TestData.getScaleCount();
+        for (int i = 0; i < count; ++i) {
+            Write write = null;
+            while (write == null) {
+                write = TestData.getWriteAdd();
+            }
+            buffer.insert(write, true);
+        }
+        while (GlobalState.BINARY_QUEUE.size() < count) {
+            // wait for all the async placements onto the binary queue to finish
+            continue;
+        }
+        Assert.assertEquals(count, GlobalState.BINARY_QUEUE.size());
+        GlobalState.BINARY_QUEUE.clear();
+    }
+
+    /**
+     * Helper method used by multiple test cases to add a random number of
+     * random elements to the
+     * {@link com.cinchapi.concourse.server.storage.temp.Buffer} and a
+     * {@code List<Write>}, and
+     * returns the list.
+     *
+     * @param buff: the buffer into which objects are inserted
+     * @param size: the number of objects to insert
+     * @return: a {@code List} of
+     *          {@link com.cinchapi.concourse.server.storage.temp.Write} objects
+     *          that were also inserted into the buffer
+     */
+    private List<Write> addRandomElementsToBufferAndList(Buffer buff,
+            int size) {
+        List<Write> stored = Lists.newArrayList();
+        for (int i = 0; i < size; ++i) {
+            Write write = Write.add(TestData.getSimpleString(),
+                    TestData.getTObject(), TestData.getLong());
+            buff.insert(write);
+            stored.add(write);
+        }
+        return stored;
+    }
 }

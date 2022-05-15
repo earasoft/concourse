@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -17,20 +17,36 @@ package com.cinchapi.concourse.server;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.List;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.stream.Collectors;
 
 import javax.annotation.Nullable;
 
 import ch.qos.logback.classic.Level;
 
+import com.cinchapi.common.base.Array;
+import com.cinchapi.common.base.CheckedExceptions;
+import com.cinchapi.common.io.ByteBuffers;
+import com.cinchapi.common.reflect.Reflection;
 import com.cinchapi.concourse.Constants;
+import com.cinchapi.concourse.annotate.Experimental;
 import com.cinchapi.concourse.annotate.NonPreference;
 import com.cinchapi.concourse.config.ConcourseServerPreferences;
 import com.cinchapi.concourse.server.io.FileSystem;
+import com.cinchapi.concourse.server.plugin.data.WriteEvent;
 import com.cinchapi.concourse.util.Networking;
-import com.google.common.base.Throwables;
+import com.cinchapi.lib.config.read.Interpreters;
+import com.google.common.base.MoreObjects;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Sets;
 
 /**
@@ -40,6 +56,17 @@ import com.google.common.collect.Sets;
  * @author Jeff Nelson
  */
 public final class GlobalState extends Constants {
+
+    /**
+     * The absolute path to the root of the directory where Concourse Server is
+     * installed. This value is set by the start script. When running from
+     * Eclipse, this value is set to the launch directory.
+     */
+    @NonPreference
+    public static String CONCOURSE_HOME = MoreObjects.firstNonNull(
+            System.getProperty("com.cinchapi.concourse.server.home"),
+            System.getProperty("user.dir"));
+
     // ========================================================================
     // =========================== SYSTEM METADATA ============================
     /**
@@ -49,7 +76,7 @@ public final class GlobalState extends Constants {
      */
     private static final boolean RUNNING_FROM_ECLIPSE = System
             .getProperty("eclipse") != null
-            && System.getProperty("eclipse").equals("true") ? true : false;
+            && System.getProperty("eclipse").equals("true");
 
     // ========================================================================
     // ============================ PREFERENCES ================================
@@ -63,6 +90,13 @@ public final class GlobalState extends Constants {
      * 3. Add a placeholder for the new preference to the stock concourse.prefs
      * file in conf/concourse.prefs.
      */
+
+    /**
+     * The path to the file that contains access credentials used to secure
+     * access to {@link com.cinchapi.concourse.server.ConcourseServer Concourse
+     * Server}.
+     */
+    public static String ACCESS_CREDENTIALS_FILE = ".access";
 
     /**
      * The absolute path to the directory where the Database record and index
@@ -81,6 +115,15 @@ public final class GlobalState extends Constants {
      */
     public static String BUFFER_DIRECTORY = System.getProperty("user.home")
             + File.separator + "concourse" + File.separator + "buffer";
+
+    /**
+     * This {@link UUID} is used to identify the Concourse instance across host
+     * and port changes. This id will be registered locally in the system in
+     * data and buffer directory.
+     */
+    @NonPreference
+    @Nullable
+    public static UUID SYSTEM_ID = null;
 
     /**
      * The size for each page in the Buffer. During reads, Buffer pages
@@ -106,11 +149,19 @@ public final class GlobalState extends Constants {
     public static int SHUTDOWN_PORT = 3434;
 
     /**
-     * The listener port (1-65535) for management connections via JMX. Choose a
-     * port between 49152 and 65535 to minimize the possibility of conflicts
-     * with other services on this host.
+     * The listener port (1-65535) for JMX connections. Choose a port between
+     * 49152 and 65535 to minimize the possibility of conflicts with other
+     * services on this host.
      */
     public static int JMX_PORT = 9010;
+
+    /**
+     * The listener port (1-65535) for the management server. Choose a port
+     * between
+     * 49152 and 65535 to minimize the possibility of conflicts with other
+     * services on this host.
+     */
+    public static int MANAGEMENT_PORT = 9011;
 
     /**
      * The amount of memory that is allocated to the Concourse Server JVM.
@@ -131,6 +182,44 @@ public final class GlobalState extends Constants {
      * Concourse HTTP Server is disabled.
      */
     public static int HTTP_PORT = 0;
+
+    /**
+     * Determine if the HTTP Server should enable and process preferences
+     * related to Cross-Origin Resource Sharing requests.
+     */
+    public static boolean HTTP_ENABLE_CORS = false;
+
+    /**
+     * A comma separated list of default URIs that are permitted to access HTTP
+     * endpoints. By default (if enabled), the value of this preference is set
+     * to the wildcard character '*' which means that any origin is allowed
+     * access. Changing this value to a discrete list will set the default
+     * origins that are permitted, but individual endpoints may override this
+     * value.
+     */
+    public static String HTTP_CORS_DEFAULT_ALLOW_ORIGIN = "*";
+
+    /**
+     * A comma separated list of default headers that are sent in response to a
+     * CORS preflight request to indicate which HTTP headers can be used when
+     * making the actual request. By default (if enabled), the value of this
+     * preference is set to the wildcard character '*' which means that any
+     * headers specified in the preflight request are allowed. Changing this
+     * value to a discrete list will set the default headers that are permitted,
+     * but individual endpoints may override this value.
+     */
+    public static String HTTP_CORS_DEFAULT_ALLOW_HEADERS = "*";
+
+    /**
+     * A comma separated list of default methods that are sent in response to a
+     * CORS preflight request to indicate which HTTP methods can be used when
+     * making the actual request. By default (if enabled), the value of this
+     * preference is set to the wildcard character '*' which means that any
+     * method specified in the preflight request is allowed. Changing this value
+     * to a discrete list will set the default methods that are permitted, but
+     * individual endpoints may override this value.
+     */
+    public static String HTTP_CORS_DEFAULT_ALLOW_METHODS = "*";
 
     /**
      * The default environment that is automatically loaded when the server
@@ -168,67 +257,156 @@ public final class GlobalState extends Constants {
     public static Level LOG_LEVEL = Level.INFO;
 
     /**
+     * The class representation of {@link RemoteInvocationThread}.
+     */
+    @NonPreference
+    public static final Class<?> REMOTE_INVOCATION_THREAD_CLASS = Reflection
+            .getClassCasted(
+                    "com.cinchapi.concourse.server.plugin.RemoteInvocationThread");
+
+    /**
      * Whether log messages should also be printed to the console.
      */
     public static boolean ENABLE_CONSOLE_LOGGING = RUNNING_FROM_ECLIPSE ? true
             : false;
 
+    /**
+     * The length of the longest substring that will be indexed for fulltext
+     * search.
+     * <p>
+     * Regardless of a word's length, this value controls the maximum length of
+     * any substring of the word that is added to the search index. For optimal
+     * performance, this value should be set to the longest possible substring
+     * of a word that would be entered for a search operation. To be safe, it is
+     * recommended to set this value to the length of the longest possible word
+     * in the target language. For example, the longest possible word in English
+     * is about 40 characters long.
+     * </p>
+     */
+    public static int MAX_SEARCH_SUBSTRING_LENGTH = -1;
+
+    /**
+     * Automatically use a combination of defragmentation, garbage collection
+     * and load balancing within the data files to optimize storage for read
+     * performance.
+     * <p>
+     * The compaction process runs continuously in the background without
+     * disrupting reads or writes. The storage engine uses a specific strategy
+     * to determine how data files should be reorganized to improve the
+     * performance of read operations.
+     * </p>
+     */
+    @Experimental
+    public static boolean ENABLE_COMPACTION = false;
+
+    /**
+     * Maintain and in-memory cache of the data indexes used to respond to
+     * {@link com.cinchapi.concourse.Concourse#search(String, String)} commands.
+     * <p>
+     * Search indexes tend to be much larger than those used for primary and
+     * secondary lookups, so enabling the search cache may cause
+     * memory issues (and overall performance degradation) if search is heavily
+     * used. Furthermore, indexing and write performance may also suffer if
+     * cached search indexes must be incrementally kept current.
+     * </p>
+     */
+    @Experimental
+    public static boolean ENABLE_SEARCH_CACHE = false;
+
+    /**
+     * Attempt to optimize
+     * {@link com.cinchapi.concourse.Concourse#verify(String, Object, long)
+     * verify} commands by using special lookup records.
+     * <p>
+     * The database does not cache lookup records, so, while generating one is
+     * theoretically faster than generating a full or partial record, repeated
+     * attempts to verify data in the same field (e.g. a counter whose value is
+     * stored against a single locator/key) or record may be slower due to lack
+     * of caching.
+     * </p>
+     */
+    @Experimental
+    public static boolean ENABLE_VERIFY_BY_LOOKUP = false;
+
     static {
-        ConcourseServerPreferences config;
-        try {
-            String devPrefs = "conf" + File.separator + "concourse.prefs.dev";
-            String defaultPrefs = "conf" + File.separator + "concourse.prefs";
-            if(FileSystem.hasFile(devPrefs)) {
-                config = ConcourseServerPreferences.open(devPrefs);
-                PREFS_FILE_PATH = FileSystem.expandPath(devPrefs);
-            }
-            else {
-                config = ConcourseServerPreferences.open(defaultPrefs);
-                PREFS_FILE_PATH = FileSystem.expandPath(defaultPrefs);
-            }
+        List<String> files = ImmutableList.of(
+                "conf" + File.separator + "concourse.prefs",
+                "conf" + File.separator + "concourse.prefs.dev");
+        ConcourseServerPreferences config = ConcourseServerPreferences
+                .from(files.stream()
+                        .map(file -> Paths.get(FileSystem.expandPath(file)))
+                        .collect(Collectors.toList())
+                        .toArray(Array.containing()));
+
+        // =================== PREF READING BLOCK ====================
+        ACCESS_CREDENTIALS_FILE = FileSystem
+                .expandPath(config.getOrDefault("access_credentials_file",
+                        ACCESS_CREDENTIALS_FILE), CONCOURSE_HOME);
+
+        DATABASE_DIRECTORY = config.getOrDefault("database_directory",
+                DATABASE_DIRECTORY);
+
+        BUFFER_DIRECTORY = config.getOrDefault("buffer_directory",
+                BUFFER_DIRECTORY);
+
+        BUFFER_PAGE_SIZE = (int) config.getSize("buffer_page_size",
+                BUFFER_PAGE_SIZE);
+
+        CLIENT_PORT = config.getOrDefault("client_port", CLIENT_PORT);
+
+        SHUTDOWN_PORT = config.getOrDefault("shutdown_port",
+                Networking.getCompanionPort(CLIENT_PORT, 2));
+
+        JMX_PORT = config.getOrDefault("jmx_port", JMX_PORT);
+
+        HEAP_SIZE = config.getSize("heap_size", HEAP_SIZE);
+
+        HTTP_PORT = config.getOrDefault("http_port", HTTP_PORT);
+
+        HTTP_ENABLE_CORS = config.getOrDefault("http_enable_cors",
+                HTTP_ENABLE_CORS);
+
+        HTTP_CORS_DEFAULT_ALLOW_ORIGIN = config.getOrDefault(
+                "http_cors_default_allow_origin",
+                HTTP_CORS_DEFAULT_ALLOW_ORIGIN);
+
+        HTTP_CORS_DEFAULT_ALLOW_HEADERS = config.getOrDefault(
+                "http_cors_default_allow_headers",
+                HTTP_CORS_DEFAULT_ALLOW_HEADERS);
+
+        HTTP_CORS_DEFAULT_ALLOW_METHODS = config.getOrDefault(
+                "http_cors_default_allow_methods",
+                HTTP_CORS_DEFAULT_ALLOW_METHODS);
+
+        LOG_LEVEL = config.getOrDefault("log_level", Interpreters.logLevel(),
+                LOG_LEVEL);
+
+        ENABLE_CONSOLE_LOGGING = config.getOrDefault("enable_console_logging",
+                ENABLE_CONSOLE_LOGGING);
+        if(!ENABLE_CONSOLE_LOGGING) {
+            ENABLE_CONSOLE_LOGGING = Boolean.parseBoolean(System.getProperty(
+                    "com.cinchapi.concourse.server.logging.console", "false"));
         }
-        catch (Exception e) {
-            config = null;
-        }
-        if(config != null) {
-            // =================== PREF READING BLOCK ====================
-            DATABASE_DIRECTORY = config.getString("database_directory",
-                    DATABASE_DIRECTORY);
+        DEFAULT_ENVIRONMENT = config.getOrDefault("default_environment",
+                DEFAULT_ENVIRONMENT);
 
-            BUFFER_DIRECTORY = config.getString("buffer_directory",
-                    BUFFER_DIRECTORY);
+        MANAGEMENT_PORT = config.getOrDefault("management_port",
+                Networking.getCompanionPort(CLIENT_PORT, 4));
 
-            BUFFER_PAGE_SIZE = (int) config.getSize("buffer_page_size",
-                    BUFFER_PAGE_SIZE);
+        SYSTEM_ID = getSystemId();
 
-            CLIENT_PORT = config.getInt("client_port", CLIENT_PORT);
+        MAX_SEARCH_SUBSTRING_LENGTH = config.getOrDefault(
+                "max_search_substring_length", MAX_SEARCH_SUBSTRING_LENGTH);
 
-            SHUTDOWN_PORT = config.getInt("shutdown_port",
-                    Networking.getCompanionPort(CLIENT_PORT, 2));
+        ENABLE_COMPACTION = config.getOrDefault("enable_compaction",
+                ENABLE_COMPACTION);
 
-            JMX_PORT = config.getInt("jmx_port", JMX_PORT);
+        ENABLE_SEARCH_CACHE = config.getOrDefault("enable_search_cache",
+                ENABLE_SEARCH_CACHE);
 
-            HEAP_SIZE = config.getSize("heap_size", HEAP_SIZE);
-
-            HTTP_PORT = config.getInt("http_port", HTTP_PORT);
-
-            LOG_LEVEL = Level.valueOf(config.getString("log_level",
-                    LOG_LEVEL.toString()));
-
-            ENABLE_CONSOLE_LOGGING = config.getBoolean(
-                    "enable_console_logging", ENABLE_CONSOLE_LOGGING);
-            if(!ENABLE_CONSOLE_LOGGING) {
-                ENABLE_CONSOLE_LOGGING = Boolean
-                        .parseBoolean(System
-                                .getProperty(
-                                        "com.cinchapi.concourse.server.logging.console",
-                                        "false"));
-            }
-
-            DEFAULT_ENVIRONMENT = config.getString("default_environment",
-                    DEFAULT_ENVIRONMENT);
-            // =================== PREF READING BLOCK ====================
-        }
+        ENABLE_VERIFY_BY_LOOKUP = config.getOrDefault("enable_verify_by_lookup",
+                ENABLE_VERIFY_BY_LOOKUP);
+        // =================== PREF READING BLOCK ====================
     }
 
     /**
@@ -239,26 +417,26 @@ public final class GlobalState extends Constants {
     public static final Set<String> STOPWORDS = Sets.newHashSet();
     static {
         try {
-            BufferedReader reader = new BufferedReader(new FileReader("conf"
-                    + File.separator + "stopwords.txt"));
+            BufferedReader reader = new BufferedReader(
+                    new FileReader("conf" + File.separator + "stopwords.txt"));
             String line = null;
             while ((line = reader.readLine()) != null) {
                 STOPWORDS.add(line);
             }
             reader.close();
         }
+        catch (FileNotFoundException e) {}
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 
     /**
-     * The file which contains the credentials used by the
-     * {@link com.cinchapi.concourse.security.AccessManager}.
-     * This file is typically located in the root of the server installation.
+     * A global {@link BlockingQueue} that is populated with {@link WriteEvent
+     * write events} within each environment's {@link Buffer}.
      */
     @NonPreference
-    public static String ACCESS_FILE = ".access";
+    public static LinkedBlockingQueue<WriteEvent> BINARY_QUEUE = new LinkedBlockingQueue<WriteEvent>();
 
     /**
      * The name of the cookie where the HTTP auth token is stored.
@@ -317,6 +495,13 @@ public final class GlobalState extends Constants {
     public static final String HTTP_TRANSACTION_TOKEN_ATTRIBUTE = "com.cinchapi.concourse.server.http.TransactionTokenAttribute";
 
     /**
+     * The number of bytes to read from disk at a time.
+     */
+    @NonPreference
+    public static final int DISK_READ_BUFFER_SIZE = (int) Math.pow(2, 20); // 1048567
+                                                                           // (~1MiB)
+
+    /**
      * The path to the underlying file from which the preferences are extracted.
      * This value is set in the static initialization block.
      */
@@ -335,6 +520,66 @@ public final class GlobalState extends Constants {
     @Nullable
     public static String getPrefsFilePath() {
         return PREFS_FILE_PATH;
+    }
+
+    /**
+     * Return the canonical system id based on the storage directories that are
+     * configured this this instance.
+     * <p>
+     * If the system id does not exist, create a new one and store it. If
+     * different system ids are stored, return {@code null} to indicate that the
+     * system is in an inconsistent state.
+     * </p>
+     * 
+     * @return a {@link UUID} that represents the system id
+     */
+    private static UUID getSystemId() {
+        String relativeFileName = ".id";
+        Path bufferId = Paths.get(BUFFER_DIRECTORY, relativeFileName);
+        Path databaseId = Paths.get(DATABASE_DIRECTORY, relativeFileName);
+        List<String> files = ImmutableList.of(bufferId.toString(),
+                databaseId.toString());
+        boolean hasBufferId = FileSystem.hasFile(bufferId);
+        boolean hasDatabaseId = FileSystem.hasFile(databaseId);
+        if(hasBufferId && hasDatabaseId) { // Verify that the system id in the
+                                           // database and buffer are
+                                           // consistent.
+            UUID uuid = null;
+            for (String file : files) {
+                ByteBuffer bytes = FileSystem.readBytes(file);
+                long mostSignificantBits = bytes.getLong();
+                long leastSignificantBits = bytes.getLong();
+                UUID stored = new UUID(mostSignificantBits,
+                        leastSignificantBits);
+                if(uuid == null || stored.equals(uuid)) {
+                    uuid = stored;
+                    continue;
+                }
+                else {
+                    uuid = null;
+                    break;
+                }
+            }
+            return uuid;
+        }
+        else if(!hasBufferId && !hasDatabaseId) { // Create a system id and
+                                                  // store it in the database
+                                                  // and buffer.
+            UUID uuid = UUID.randomUUID();
+            ByteBuffer bytes = ByteBuffer.allocate(16);
+            bytes.putLong(uuid.getMostSignificantBits());
+            bytes.putLong(uuid.getLeastSignificantBits());
+            bytes.flip();
+            for (String file : files) {
+                FileSystem.writeBytes(ByteBuffers.asReadOnlyBuffer(bytes),
+                        file);
+            }
+            return uuid;
+        }
+        else { // The system id is not consistent across the buffer and
+               // database.
+            return null;
+        }
     }
 
 }

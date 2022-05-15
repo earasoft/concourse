@@ -1,4 +1,4 @@
-# Copyright (c) 2013-2016 Cinchapi Inc.
+# Copyright (c) 2013-2022 Cinchapi Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -40,7 +40,7 @@ setup(
     license='Apache, Version 2.0',
     packages=find_packages(exclude=['contrib', 'docs', 'tests*']),
     install_requires=[
-        'thrift == 0.9.2',
+        'thrift == 0.9.3',
         'jsonpickle == 0.9.2',
     ],
     extra_require={

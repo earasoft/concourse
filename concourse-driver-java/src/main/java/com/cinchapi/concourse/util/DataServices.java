@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,10 +15,6 @@
  */
 package com.cinchapi.concourse.util;
 
-import java.util.Collection;
-import java.util.Map;
-
-import com.cinchapi.concourse.thrift.TObject;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonParser;
@@ -52,15 +48,12 @@ public class DataServices {
      * THE Gson.
      */
     private static final Gson GSON = new GsonBuilder()
-            .registerTypeAdapter(Object.class,
-                    TypeAdapters.forGenericObject().nullSafe())
-            .registerTypeAdapter(TObject.class,
-                    TypeAdapters.forTObject().nullSafe())
-            .registerTypeHierarchyAdapter(Collection.class,
-                    TypeAdapters.forCollection().nullSafe())
-            .registerTypeHierarchyAdapter(Map.class,
-                    TypeAdapters.forMap().nullSafe()).disableHtmlEscaping()
-            .create();
+            .registerTypeAdapterFactory(
+                    TypeAdapters.primitiveTypesFactory(true))
+            .registerTypeAdapterFactory(TypeAdapters.tObjectFactory(true))
+            .registerTypeAdapterFactory(TypeAdapters.collectionFactory(true))
+            .registerTypeAdapterFactory(TypeAdapters.functionFactory(true))
+            .disableHtmlEscaping().create();
 
     /**
      * A JsonParser.

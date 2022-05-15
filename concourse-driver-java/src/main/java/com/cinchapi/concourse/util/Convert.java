@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -17,6 +17,7 @@ package com.cinchapi.concourse.util;
 
 import java.io.IOException;
 import java.io.StringReader;
+import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
@@ -24,21 +25,44 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import javax.annotation.concurrent.Immutable;
 
+import org.joda.time.format.DateTimeFormat;
+import org.joda.time.format.DateTimeFormatter;
+
+import com.cinchapi.ccl.grammar.FunctionValueSymbol;
+import com.cinchapi.ccl.grammar.Symbol;
+import com.cinchapi.ccl.syntax.ConditionTree;
+import com.cinchapi.ccl.syntax.FunctionTree;
+import com.cinchapi.ccl.type.Function;
+import com.cinchapi.ccl.type.function.IndexFunction;
+import com.cinchapi.ccl.type.function.KeyConditionFunction;
+import com.cinchapi.ccl.type.function.KeyRecordsFunction;
+import com.cinchapi.ccl.type.function.TemporalFunction;
+import com.cinchapi.ccl.util.NaturalLanguage;
+import com.cinchapi.common.base.AnyStrings;
+import com.cinchapi.common.base.ArrayBuilder;
+import com.cinchapi.common.base.CheckedExceptions;
+import com.cinchapi.common.base.Enums;
+import com.cinchapi.common.io.ByteBuffers;
 import com.cinchapi.concourse.Concourse;
 import com.cinchapi.concourse.Link;
 import com.cinchapi.concourse.Tag;
+import com.cinchapi.concourse.Timestamp;
 import com.cinchapi.concourse.annotate.PackagePrivate;
 import com.cinchapi.concourse.annotate.UtilityClass;
+import com.cinchapi.concourse.lang.ConcourseCompiler;
 import com.cinchapi.concourse.thrift.Operator;
 import com.cinchapi.concourse.thrift.TObject;
 import com.cinchapi.concourse.thrift.Type;
 import com.google.common.base.MoreObjects;
-import com.google.common.base.Throwables;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.HashMultimap;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Sets;
 import com.google.common.primitives.Longs;
@@ -56,6 +80,87 @@ import com.google.gson.stream.JsonToken;
  */
 @UtilityClass
 public final class Convert {
+
+    /**
+     * A mapping from strings that can be translated to {@link Operator
+     * operators} to the operations to which they can be translated.
+     */
+    @PackagePrivate
+    static Map<String, Operator> OPERATOR_STRINGS;
+    static {
+        OPERATOR_STRINGS = Maps.newHashMap();
+        OPERATOR_STRINGS.put("==", Operator.EQUALS);
+        OPERATOR_STRINGS.put("=", Operator.EQUALS);
+        OPERATOR_STRINGS.put("eq", Operator.EQUALS);
+        OPERATOR_STRINGS.put("!=", Operator.NOT_EQUALS);
+        OPERATOR_STRINGS.put("ne", Operator.NOT_EQUALS);
+        OPERATOR_STRINGS.put(">", Operator.GREATER_THAN);
+        OPERATOR_STRINGS.put("gt", Operator.GREATER_THAN);
+        OPERATOR_STRINGS.put(">=", Operator.GREATER_THAN_OR_EQUALS);
+        OPERATOR_STRINGS.put("gte", Operator.GREATER_THAN_OR_EQUALS);
+        OPERATOR_STRINGS.put("<", Operator.LESS_THAN);
+        OPERATOR_STRINGS.put("lt", Operator.LESS_THAN);
+        OPERATOR_STRINGS.put("<=", Operator.LESS_THAN_OR_EQUALS);
+        OPERATOR_STRINGS.put("lte", Operator.LESS_THAN_OR_EQUALS);
+        OPERATOR_STRINGS.put("><", Operator.BETWEEN);
+        OPERATOR_STRINGS.put("bw", Operator.BETWEEN);
+        OPERATOR_STRINGS.put("->", Operator.LINKS_TO);
+        OPERATOR_STRINGS.put("lnks2", Operator.LINKS_TO);
+        OPERATOR_STRINGS.put("lnk2", Operator.LINKS_TO);
+        OPERATOR_STRINGS.put("regex", Operator.REGEX);
+        OPERATOR_STRINGS.put("nregex", Operator.NOT_REGEX);
+        OPERATOR_STRINGS.put("like", Operator.LIKE);
+        OPERATOR_STRINGS.put("nlike", Operator.NOT_LIKE);
+        for (Operator operator : Operator.values()) {
+            OPERATOR_STRINGS.put(operator.name(), operator);
+            OPERATOR_STRINGS.put(operator.symbol(), operator);
+        }
+        OPERATOR_STRINGS = ImmutableMap.copyOf(OPERATOR_STRINGS);
+    }
+
+    /**
+     * The component of a resolvable link symbol that comes after the
+     * resolvable key specification in the raw data.
+     */
+    @PackagePrivate
+    static final String RAW_RESOLVABLE_LINK_SYMBOL_APPEND = "@"; // visible
+                                                                 // for
+                                                                 // testing
+
+    /**
+     * The component of a resolvable link symbol that comes before the
+     * resolvable key specification in the raw data.
+     */
+    @PackagePrivate
+    static final String RAW_RESOLVABLE_LINK_SYMBOL_PREPEND = "@"; // visible
+                                                                  // for
+                                                                  // testing
+
+    /**
+     * These classes have a special encoding that signals that string value
+     * should actually be converted to those instances in
+     * {@link #jsonToJava(JsonReader)}.
+     */
+    private static Set<Class<?>> CLASSES_WITH_ENCODED_STRING_REPR = Sets
+            .newHashSet(Link.class, Tag.class, ResolvableLink.class,
+                    Timestamp.class, IndexFunction.class,
+                    KeyConditionFunction.class, KeyRecordsFunction.class);
+
+    /**
+     * A {@link Pattern} that can be used to determine whether a string matches
+     * the expected pattern of an instruction to insert links to records that
+     * are resolved by finding matches to a criteria.
+     */
+    // NOTE: This REGEX enforces that the string must contain at least one
+    // space, which means that a CCL string can only be considered valid if it
+    // contains a space (e.g. name=jeff is not valid CCL).
+    private static final Pattern STRING_RESOLVABLE_LINK_REGEX = Pattern
+            .compile("^@(?=.*[ ]).+@$");
+
+    /**
+     * The character that indicates a String should be treated as a {@link Tag}.
+     */
+    private static final char TAG_MARKER = '`';
 
     /**
      * Takes a JSON string representation of an object or an array of JSON
@@ -87,7 +192,7 @@ public final class Convert {
             }
         }
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
         return result;
     }
@@ -99,50 +204,140 @@ public final class Convert {
      * @return the TObject
      */
     public static TObject javaToThrift(Object object) {
-        ByteBuffer bytes;
-        Type type = null;
-        if(object instanceof Boolean) {
-            bytes = ByteBuffer.allocate(1);
-            bytes.put((boolean) object ? (byte) 1 : (byte) 0);
-            type = Type.BOOLEAN;
-        }
-        else if(object instanceof Double) {
-            bytes = ByteBuffer.allocate(8);
-            bytes.putDouble((double) object);
-            type = Type.DOUBLE;
-        }
-        else if(object instanceof Float) {
-            bytes = ByteBuffer.allocate(4);
-            bytes.putFloat((float) object);
-            type = Type.FLOAT;
-        }
-        else if(object instanceof Link) {
-            bytes = ByteBuffer.allocate(8);
-            bytes.putLong(((Link) object).longValue());
-            type = Type.LINK;
-        }
-        else if(object instanceof Long) {
-            bytes = ByteBuffer.allocate(8);
-            bytes.putLong((long) object);
-            type = Type.LONG;
-        }
-        else if(object instanceof Integer) {
-            bytes = ByteBuffer.allocate(4);
-            bytes.putInt((int) object);
-            type = Type.INTEGER;
-        }
-        else if(object instanceof Tag) {
-            bytes = ByteBuffer.wrap(object.toString().getBytes(
-                    StandardCharsets.UTF_8));
-            type = Type.TAG;
+        if(object == null) {
+            return TObject.NULL;
         }
         else {
-            bytes = ByteBuffer.wrap(object.toString().getBytes(
-                    StandardCharsets.UTF_8));
-            type = Type.STRING;
+            ByteBuffer bytes;
+            Type type = null;
+            if(object instanceof Boolean) {
+                bytes = ByteBuffer.allocate(1);
+                bytes.put((boolean) object ? (byte) 1 : (byte) 0);
+                type = Type.BOOLEAN;
+            }
+            else if(object instanceof Double) {
+                bytes = ByteBuffer.allocate(8);
+                bytes.putDouble((double) object);
+                type = Type.DOUBLE;
+            }
+            else if(object instanceof Float) {
+                bytes = ByteBuffer.allocate(4);
+                bytes.putFloat((float) object);
+                type = Type.FLOAT;
+            }
+            else if(object instanceof Link) {
+                bytes = ByteBuffer.allocate(8);
+                bytes.putLong(((Link) object).longValue());
+                type = Type.LINK;
+            }
+            else if(object instanceof Long) {
+                bytes = ByteBuffer.allocate(8);
+                bytes.putLong((long) object);
+                type = Type.LONG;
+            }
+            else if(object instanceof Integer) {
+                bytes = ByteBuffer.allocate(4);
+                bytes.putInt((int) object);
+                type = Type.INTEGER;
+            }
+            else if(object instanceof BigDecimal) {
+                bytes = ByteBuffer.allocate(8);
+                bytes.putDouble((double) ((BigDecimal) object).doubleValue());
+                type = Type.DOUBLE;
+            }
+            else if(object instanceof Tag) {
+                bytes = ByteBuffer.wrap(
+                        object.toString().getBytes(StandardCharsets.UTF_8));
+                type = Type.TAG;
+            }
+            else if(object instanceof Timestamp) {
+                try {
+                    bytes = ByteBuffer.allocate(8);
+                    bytes.putLong(((Timestamp) object).getMicros());
+                    type = Type.TIMESTAMP;
+                }
+                catch (IllegalStateException e) {
+                    throw new UnsupportedOperationException(
+                            "Cannot convert string based Timestamp to a TObject");
+                }
+            }
+            else if(object instanceof Function) {
+                type = Type.FUNCTION;
+                Function function = (Function) object;
+                byte[] nameBytes = function.operation()
+                        .getBytes(StandardCharsets.UTF_8);
+                byte[] keyBytes = function.key()
+                        .getBytes(StandardCharsets.UTF_8);
+                if(function instanceof IndexFunction) {
+                    /*
+                     * Schema:
+                     * | type (1) | timestamp(8) | nameLength (4) | name
+                     * (nameLength) | key |
+                     */
+                    bytes = ByteBuffer.allocate(
+                            1 + 8 + 4 + nameBytes.length + keyBytes.length);
+                    bytes.put((byte) FunctionType.INDEX.ordinal());
+                    bytes.putLong(((TemporalFunction) function).timestamp());
+                    bytes.putInt(nameBytes.length);
+                    bytes.put(nameBytes);
+                    bytes.put(keyBytes);
+                }
+                else if(function instanceof KeyRecordsFunction) {
+                    /*
+                     * Schema:
+                     * | type (1) | timestamp(8) | nameLength (4) | name
+                     * (nameLength) | keyLength (4) | key (keyLength) | records
+                     * (8 each) |
+                     */
+                    KeyRecordsFunction func = (KeyRecordsFunction) function;
+                    bytes = ByteBuffer.allocate(1 + 8 + 4 + nameBytes.length + 4
+                            + keyBytes.length + 8 * func.source().size());
+                    bytes.put((byte) FunctionType.KEY_RECORDS.ordinal());
+                    bytes.putLong(((TemporalFunction) function).timestamp());
+                    bytes.putInt(nameBytes.length);
+                    bytes.put(nameBytes);
+                    bytes.putInt(keyBytes.length);
+                    bytes.put(keyBytes);
+                    for (long record : func.source()) {
+                        bytes.putLong(record);
+                    }
+                }
+                else if(function instanceof KeyConditionFunction) {
+                    /*
+                     * Schema:
+                     * | type (1) | timestamp(8) | nameLength (4) | name
+                     * (nameLength) | keyLength (4) | key (keyLength) |
+                     * condition |
+                     */
+                    KeyConditionFunction func = (KeyConditionFunction) function;
+                    String condition = ConcourseCompiler.get()
+                            .tokenize(func.source()).stream()
+                            .map(Symbol::toString)
+                            .collect(Collectors.joining(" "));
+                    bytes = ByteBuffer.allocate(1 + 9 + 4 + nameBytes.length + 4
+                            + keyBytes.length + condition.length());
+                    bytes.put((byte) FunctionType.KEY_CONDITION.ordinal());
+                    bytes.putLong(((TemporalFunction) function).timestamp());
+                    bytes.putInt(nameBytes.length);
+                    bytes.put(nameBytes);
+                    bytes.putInt(keyBytes.length);
+                    bytes.put(keyBytes);
+                    bytes.put(condition.getBytes(StandardCharsets.UTF_8));
+                }
+                else {
+                    throw new UnsupportedOperationException(
+                            "Cannot convert the following function to a TObject: "
+                                    + function);
+                }
+            }
+            else {
+                bytes = ByteBuffer.wrap(
+                        object.toString().getBytes(StandardCharsets.UTF_8));
+                type = Type.STRING;
+            }
+            bytes.rewind();
+            return new TObject(bytes, type).setJavaFormat(object);
         }
-        bytes.rewind();
-        return new TObject(bytes, type).setJavaFormat(object);
     }
 
     /**
@@ -170,7 +365,7 @@ public final class Convert {
             return jsonToJava(reader);
         }
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 
@@ -275,6 +470,40 @@ public final class Convert {
     }
 
     /**
+     * For a scalar object that may be a {@link TObject} or a collection of
+     * other objects that may contain {@link TObject TObjects}, convert to the
+     * appropriate java representation.
+     * 
+     * @param tobject the possible TObject or collection of TObjects
+     * @return the java representation
+     */
+    @SuppressWarnings("unchecked")
+    public static <T> T possibleThriftToJava(Object tobject) {
+        if(tobject instanceof TObject) {
+            return (T) thriftToJava((TObject) tobject);
+        }
+        else if(tobject instanceof List) {
+            return (T) ((List<?>) tobject).stream()
+                    .map(Convert::possibleThriftToJava)
+                    .collect(Collectors.toList());
+        }
+        else if(tobject instanceof Set) {
+            return (T) ((Set<?>) tobject).stream()
+                    .map(Convert::possibleThriftToJava)
+                    .collect(Collectors.toSet());
+        }
+        else if(tobject instanceof Map) {
+            return (T) ((Map<?, ?>) tobject).entrySet().stream()
+                    .collect(Collectors.toMap(
+                            e -> possibleThriftToJava(e.getKey()),
+                            e -> possibleThriftToJava(e.getValue())));
+        }
+        else {
+            return (T) tobject;
+        }
+    }
+
+    /**
      * Analyze {@code value} and convert it to the appropriate Java primitive or
      * Object.
      * <p>
@@ -289,7 +518,7 @@ public final class Convert {
      * the {@link #stringToResolvableLinkSpecification(String, String)} method
      * (<strong>NOTE: </strong> this is a rare case)</li>
      * <li><strong>{@link Link}</strong> - the value is converted to a Link if
-     * it is an int or long that is wrapped by '@' signs (i.e. @1234@)</li>
+     * it is an int or long that is prepended by an '@' sign (i.e. @1234)</li>
      * <li><strong>Boolean</strong> - the value is converted to a Boolean if it
      * is equal to 'true', or 'false' regardless of case</li>
      * <li><strong>Double</strong> - the value is converted to a double if and
@@ -301,6 +530,9 @@ public final class Convert {
      * non double number depending upon whether it is a standard integer (e.g.
      * less than {@value java.lang.Integer#MAX_VALUE}), a long, or a floating
      * point decimal</li>
+     * <li><strong>Function</strong> - the value is converted to a
+     * {@link Function} if it is not quoted and can be parsed as such by the
+     * {@link ConcourseCompiler}.</li>
      * </ul>
      * </p>
      * 
@@ -315,12 +547,12 @@ public final class Convert {
         char first = value.charAt(0);
         char last = value.charAt(value.length() - 1);
         Long record;
-        if(Strings.isWithinQuotes(value)) {
+        if(AnyStrings.isWithinQuotes(value, TAG_MARKER)) {
             // keep value as string since its between single or double quotes
             return value.substring(1, value.length() - 1);
         }
-        else if(first == '@'
-                && (record = Longs.tryParse(value.substring(1, value.length()))) != null) {
+        else if(first == '@' && (record = Longs
+                .tryParse(value.substring(1, value.length()))) != null) {
             return Link.to(record);
         }
         else if(first == '@' && last == '@'
@@ -335,12 +567,57 @@ public final class Convert {
         else if(value.equalsIgnoreCase("false")) {
             return false;
         }
-        else if(first == '`' && last == '`') {
+        else if(first == TAG_MARKER && last == TAG_MARKER) {
             return Tag.create(value.substring(1, value.length() - 1));
         }
+        else if(first == '|' && last == '|') {
+            value = value.substring(1, value.length() - 1);
+            String[] toks = value.split("\\|");
+            Timestamp timestamp;
+            if(toks.length == 1) {
+                // #value is a timestring that intends to rely on either one of
+                // the built-in DateTimeFormatters or the natural language
+                // translation in order to figure out the microseconds with
+                // which to create the Timestamp
+                timestamp = Timestamp
+                        .fromMicros(NaturalLanguage.parseMicros(value));
+            }
+            else {
+                // #value looks like timestring|format in which case the second
+                // part is the DateTimeFormatter to use for getting the
+                // microseconds with which to create the Timestamp
+                // Valid formatting options can be found at
+                // http://www.joda.org/joda-time/apidocs/org/joda/time/format/DateTimeFormat.html
+                DateTimeFormatter formatter = DateTimeFormat
+                        .forPattern(toks[1]);
+                timestamp = Timestamp.parse(toks[0], formatter);
+            }
+            return timestamp;
+        }
         else {
-            return MoreObjects.firstNonNull(Strings.tryParseNumber(value),
-                    value);
+            if(last == ')') {
+                // It is possible that the string is a FunctionValue, so use the
+                // Compiler to try to parse it as such. Please note that this
+                // method intentionally does not attempt to convert to an
+                // ImplictKeyRecordFunction (e.g. key | function) because those
+                // cannot serve as a evaluation value
+                try {
+                    FunctionTree tree = (FunctionTree) ConcourseCompiler.get()
+                            .parse(value);
+                    FunctionValueSymbol symbol = (FunctionValueSymbol) tree
+                            .root();
+                    return symbol.function();
+                }
+                catch (Exception e) {/* ignore */}
+            }
+            try {
+                return MoreObjects
+                        .firstNonNull(AnyStrings.tryParseNumber(value), value);
+            }
+            catch (NumberFormatException e) {
+                return value;
+            }
+
         }
     }
 
@@ -353,44 +630,13 @@ public final class Convert {
      *         {@code symbol}
      */
     public static Operator stringToOperator(String symbol) {
-        switch (symbol.toLowerCase()) {
-        case "==":
-        case "=":
-        case "eq":
-            return Operator.EQUALS;
-        case "!=":
-        case "ne":
-            return Operator.NOT_EQUALS;
-        case ">":
-        case "gt":
-            return Operator.GREATER_THAN;
-        case ">=":
-        case "gte":
-            return Operator.GREATER_THAN_OR_EQUALS;
-        case "<":
-        case "lt":
-            return Operator.LESS_THAN;
-        case "<=":
-        case "lte":
-            return Operator.LESS_THAN_OR_EQUALS;
-        case "><":
-        case "bw":
-            return Operator.BETWEEN;
-        case "->":
-        case "lnk2":
-        case "lnks2":
-            return Operator.LINKS_TO;
-        case "regex":
-            return Operator.REGEX;
-        case "nregex":
-            return Operator.NOT_REGEX;
-        case "like":
-            return Operator.LIKE;
-        case "nlike":
-            return Operator.NOT_LIKE;
-        default:
-            throw new IllegalStateException("Cannot parse " + symbol
-                    + " into an operator");
+        Operator operator = OPERATOR_STRINGS.get(symbol);
+        if(operator == null) {
+            throw new IllegalStateException(
+                    "Cannot parse " + symbol + " into an operator");
+        }
+        else {
+            return operator;
         }
     }
 
@@ -403,8 +649,8 @@ public final class Convert {
      * <strong>USE WITH CAUTION: </strong> This conversation is only necessary
      * when bulk inserting data in string form (i.e. importing data from a CSV
      * file) that should have static links dynamically resolved.<strong>
-     * <em>Unless you are certain otherwise, you should never need to use this 
-     * method because there is probably some intermediate function or framework 
+     * <em>Unless you are certain otherwise, you should never need to use this
+     * method because there is probably some intermediate function or framework
      * that does this for you!</em></strong>
      * </p>
      * <p>
@@ -422,7 +668,7 @@ public final class Convert {
      * @return An instruction to create a {@link ResolvableLink}
      */
     public static String stringToResolvableLinkInstruction(String ccl) {
-        return Strings.joinSimple(RAW_RESOLVABLE_LINK_SYMBOL_PREPEND, ccl,
+        return AnyStrings.joinSimple(RAW_RESOLVABLE_LINK_SYMBOL_PREPEND, ccl,
                 RAW_RESOLVABLE_LINK_SYMBOL_APPEND);
     }
 
@@ -432,7 +678,7 @@ public final class Convert {
      * for applications that import raw data but cannot use the Concourse API
      * directly and therefore cannot explicitly add links (e.g. the
      * import-framework that handles raw string data). <strong>
-     * <em>If you have access to the Concourse API, you should not use this 
+     * <em>If you have access to the Concourse API, you should not use this
      * method!</em> </strong>
      * </p>
      * Convert the {@code rawValue} into a {@link ResolvableLink} specification
@@ -452,8 +698,8 @@ public final class Convert {
     @Deprecated
     public static String stringToResolvableLinkSpecification(String key,
             String rawValue) {
-        return stringToResolvableLinkInstruction(Strings.joinWithSpace(key,
-                "=", rawValue));
+        return stringToResolvableLinkInstruction(
+                AnyStrings.joinWithSpace(key, "=", rawValue));
     }
 
     /**
@@ -463,6 +709,10 @@ public final class Convert {
      * @return the Object
      */
     public static Object thriftToJava(TObject object) {
+        Preconditions.checkState(object.getType() != null,
+                "Cannot read value because it has been "
+                        + "created with a newer version of Concourse "
+                        + "Server. Please upgrade this client.");
         Object java = object.getJavaFormat();
         if(java == null) {
             ByteBuffer buffer = object.bufferForData();
@@ -486,18 +736,84 @@ public final class Convert {
                 java = buffer.getLong();
                 break;
             case TAG:
-                java = ByteBuffers.getString(buffer);
+                java = ByteBuffers.getUtf8String(buffer);
+                break;
+            case TIMESTAMP:
+                java = Timestamp.fromMicros(buffer.getLong());
+                break;
+            case FUNCTION:
+                FunctionType type = Enums.parseIgnoreCase(FunctionType.class,
+                        buffer.get());
+                long timestamp = buffer.getLong();
+                int nameLength = buffer.getInt();
+                String name = ByteBuffers
+                        .getUtf8String(ByteBuffers.get(buffer, nameLength));
+                int keyLength;
+                String key;
+                switch (type) {
+                case INDEX:
+                    key = ByteBuffers.getUtf8String(buffer);
+                    java = new IndexFunction(name, key, timestamp);
+                    break;
+                case KEY_RECORDS:
+                    keyLength = buffer.getInt();
+                    key = ByteBuffers
+                            .getUtf8String(ByteBuffers.get(buffer, keyLength));
+                    ArrayBuilder<Long> ab = ArrayBuilder.builder();
+                    while (buffer.hasRemaining()) {
+                        long record = buffer.getLong();
+                        ab.add(record);
+                    }
+                    java = new KeyRecordsFunction(timestamp, name, key,
+                            ab.build());
+                    break;
+                case KEY_CONDITION:
+                    keyLength = buffer.getInt();
+                    key = ByteBuffers
+                            .getUtf8String(ByteBuffers.get(buffer, keyLength));
+                    String condition = ByteBuffers.getUtf8String(buffer);
+                    ConditionTree tree = (ConditionTree) ConcourseCompiler.get()
+                            .parse(condition);
+                    java = new KeyConditionFunction(name, key, tree, timestamp);
+                    break;
+                }
                 break;
             case NULL:
                 java = null;
                 break;
             default:
-                java = ByteBuffers.getString(buffer);
+                java = ByteBuffers.getUtf8String(buffer);
                 break;
             }
             buffer.rewind();
         }
         return java;
+    }
+
+    /**
+     * If {@code value} is a string that represents a function value, convert it
+     * to a {@link Function}. If {@code value} is an escaped string that could
+     * be interpreted as a function value, unescape it and return it. Otherwise,
+     * return the original value.
+     * 
+     * @param value
+     * @return the converted function value, an unescaped version of the
+     *         original {@code value} or the original {@code value}
+     */
+    public static Object toFunctionOrUnescapedValueIfPossible(Object value) {
+        if(value instanceof String) {
+            Object $value = stringToJava((String) value);
+            if($value instanceof Function) {
+                value = $value;
+            }
+            else if($value instanceof String) {
+                // It is possible that #stringToJava converted the original
+                // value to a more optimized string (e.g. dropping quotes that
+                // were used for escaping) so use the new string value
+                value = $value;
+            }
+        }
+        return value;
     }
 
     /**
@@ -615,44 +931,6 @@ public final class Convert {
             throw new JsonParseException(e.getMessage());
         }
     }
-
-    /**
-     * The component of a resolvable link symbol that comes after the
-     * resolvable key specification in the raw data.
-     */
-    @PackagePrivate
-    static final String RAW_RESOLVABLE_LINK_SYMBOL_APPEND = "@"; // visible
-                                                                 // for
-                                                                 // testing
-
-    /**
-     * The component of a resolvable link symbol that comes before the
-     * resolvable key specification in the raw data.
-     */
-    @PackagePrivate
-    static final String RAW_RESOLVABLE_LINK_SYMBOL_PREPEND = "@"; // visible
-                                                                  // for
-                                                                  // testing
-
-    /**
-     * A {@link Pattern} that can be used to determine whether a string matches
-     * the expected pattern of an instruction to insert links to records that
-     * are resolved by finding matches to a criteria.
-     */
-    // NOTE: This REGEX enforces that the string must contain at least one
-    // space, which means that a CCL string can only be considered valid if it
-    // contains a space (e.g. name=jeff is not valid CCL).
-    private static final Pattern STRING_RESOLVABLE_LINK_REGEX = Pattern
-            .compile("^@(?=.*[ ]).+@$");
-
-    /**
-     * These classes have a special encoding that signals that string value
-     * should actually be converted to those instances in
-     * {@link #jsonToJava(JsonReader)}.
-     */
-    @SuppressWarnings("unchecked")
-    private static Set<Class<?>> CLASSES_WITH_ENCODED_STRING_REPR = Sets
-            .newHashSet(Link.class, Tag.class, ResolvableLink.class);
 
     private Convert() {/* Utility Class */}
 
@@ -779,10 +1057,19 @@ public final class Convert {
 
         @Override
         public String toString() {
-            return Strings.format("{} for {}", this.getClass().getSimpleName(),
-                    ccl);
+            return AnyStrings.format("{} for {}",
+                    this.getClass().getSimpleName(), ccl);
         }
 
+    }
+
+    /**
+     * An enum that describes the possible function value types.
+     *
+     * @author Jeff Nelson
+     */
+    private enum FunctionType {
+        INDEX, KEY_RECORDS, KEY_CONDITION
     }
 
 }

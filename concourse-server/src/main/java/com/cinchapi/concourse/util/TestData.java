@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
+ * Copyright (c) 2013-2022 Cinchapi Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,21 +22,20 @@ import java.io.IOException;
 import java.util.List;
 
 import com.beust.jcommander.internal.Lists;
+import com.cinchapi.common.base.CheckedExceptions;
+import com.cinchapi.concourse.server.model.Identifier;
 import com.cinchapi.concourse.server.model.Position;
-import com.cinchapi.concourse.server.model.PrimaryKey;
 import com.cinchapi.concourse.server.model.Text;
 import com.cinchapi.concourse.server.model.Value;
 import com.cinchapi.concourse.server.storage.Action;
-import com.cinchapi.concourse.server.storage.db.PrimaryRevision;
+import com.cinchapi.concourse.server.storage.CommitVersions;
+import com.cinchapi.concourse.server.storage.db.CorpusRevision;
+import com.cinchapi.concourse.server.storage.db.IndexRevision;
 import com.cinchapi.concourse.server.storage.db.Revision;
-import com.cinchapi.concourse.server.storage.db.SearchRevision;
-import com.cinchapi.concourse.server.storage.db.SecondaryRevision;
+import com.cinchapi.concourse.server.storage.db.TableRevision;
 import com.cinchapi.concourse.server.storage.temp.Write;
 import com.cinchapi.concourse.thrift.TObject;
 import com.cinchapi.concourse.time.Time;
-import com.cinchapi.concourse.util.Convert;
-import com.cinchapi.concourse.util.Random;
-import com.google.common.base.Throwables;
 
 /**
  * A utility class for getting test data.
@@ -65,19 +64,19 @@ public final class TestData extends Random {
         return DATA_DIR + File.separator + Time.now();
     }
 
-    public static PrimaryRevision getPrimaryRevision() {
-        return Revision.createPrimaryRevision(getPrimaryKey(), getText(),
-                getValue(), Time.now(), Action.ADD);
+    public static TableRevision getPrimaryRevision() {
+        return Revision.createTableRevision(getIdentifier(), getText(),
+                getValue(), CommitVersions.next(), Action.ADD);
     }
 
-    public static SearchRevision getSearchRevision() {
-        return Revision.createSearchRevision(getText(), getText(),
-                getPosition(), Time.now(), Action.ADD);
+    public static CorpusRevision getSearchRevision() {
+        return Revision.createCorpusRevision(getText(), getText(),
+                getPosition(), CommitVersions.next(), Action.ADD);
     }
 
-    public static SecondaryRevision getSecondaryRevision() {
-        return Revision.createSecondaryRevision(getText(), getValue(),
-                getPrimaryKey(), Time.now(), Action.ADD);
+    public static IndexRevision getSecondaryRevision() {
+        return Revision.createIndexRevision(getText(), getValue(),
+                getIdentifier(), CommitVersions.next(), Action.ADD);
     }
 
     /**
@@ -86,11 +85,11 @@ public final class TestData extends Random {
      * @return a Position
      */
     public static Position getPosition() {
-        return Position.wrap(getPrimaryKey(), Math.abs(getInt()));
+        return Position.of(getIdentifier(), Math.abs(getInt()));
     }
 
-    public static PrimaryKey getPrimaryKey() {
-        return PrimaryKey.wrap(getLong());
+    public static Identifier getIdentifier() {
+        return Identifier.of(getLong());
     }
 
     /**
@@ -134,8 +133,8 @@ public final class TestData extends Random {
      */
     public static Iterable<String> getWordsDotTxt() {
         try {
-            File file = new File(TestData.class.getResource("/words.txt")
-                    .getFile());
+            File file = new File(
+                    TestData.class.getResource("/words.txt").getFile());
             BufferedReader reader = new BufferedReader(new FileReader(file));
             String line;
             List<String> lines = Lists.newArrayList();
@@ -146,7 +145,7 @@ public final class TestData extends Random {
             return lines;
         }
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
 
     }

@@ -1,4 +1,4 @@
-# Copyright (c) 2013-2016 Cinchapi Inc.
+# Copyright (c) 2013-2022 Cinchapi Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -64,6 +64,8 @@ enum Type {
   STRING = 7,
   TAG = 8,
   NULL = 9,
+  TIMESTAMP = 10,
+  FUNCTION = 11,
 }
 
 /** When re-constructing the state of a record/field/index from some base state,

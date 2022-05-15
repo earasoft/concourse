@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 package com.cinchapi.concourse.shell;
+
+import static java.text.MessageFormat.format;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -25,41 +27,41 @@ import java.lang.reflect.Modifier;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-
-import static java.text.MessageFormat.format;
-
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import javax.annotation.Nullable;
 
-import groovy.lang.Binding;
-import groovy.lang.Closure;
-import groovy.lang.GroovyShell;
-import groovy.lang.MissingMethodException;
-import groovy.lang.Script;
 import jline.TerminalFactory;
 import jline.console.ConsoleReader;
 import jline.console.UserInterruptException;
 import jline.console.completer.StringsCompleter;
 import jline.console.history.FileHistory;
 
+import org.apache.thrift.TApplicationException;
 import org.apache.thrift.transport.TTransportException;
-
-import com.cinchapi.concourse.config.ConcourseClientPreferences;
-
 import org.codehaus.groovy.control.CompilationFailedException;
 import org.codehaus.groovy.control.MultipleCompilationErrorsException;
 
 import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
+import com.cinchapi.common.base.AnyStrings;
+import com.cinchapi.common.base.CheckedExceptions;
+import com.cinchapi.common.reflect.Reflection;
 import com.cinchapi.concourse.Concourse;
 import com.cinchapi.concourse.Link;
+import com.cinchapi.concourse.PermissionException;
 import com.cinchapi.concourse.Tag;
 import com.cinchapi.concourse.Timestamp;
+import com.cinchapi.concourse.config.ConcourseClientPreferences;
 import com.cinchapi.concourse.lang.Criteria;
 import com.cinchapi.concourse.lang.StartState;
+import com.cinchapi.concourse.lang.paginate.Page;
+import com.cinchapi.concourse.lang.sort.Order;
+import com.cinchapi.concourse.lang.sort.Sort;
 import com.cinchapi.concourse.thrift.Diff;
 import com.cinchapi.concourse.thrift.Operator;
 import com.cinchapi.concourse.thrift.ParseException;
@@ -69,10 +71,15 @@ import com.cinchapi.concourse.util.Version;
 import com.google.common.base.CaseFormat;
 import com.google.common.base.Stopwatch;
 import com.google.common.base.Strings;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
+
+import groovy.lang.Binding;
+import groovy.lang.Closure;
+import groovy.lang.GroovyShell;
+import groovy.lang.MissingMethodException;
+import groovy.lang.Script;
 
 /**
  * The main program runner for the ConcourseShell client. ConcourseShell wraps a
@@ -109,7 +116,7 @@ public final class ConcourseShell {
                 opts.prefs = FileOps.expandPath(opts.prefs,
                         System.getProperty("user.dir.real"));
                 ConcourseClientPreferences prefs = ConcourseClientPreferences
-                        .open(opts.prefs);
+                        .from(Paths.get(opts.prefs));
                 opts.username = prefs.getUsername();
                 opts.password = new String(prefs.getPasswordExplicit());
                 opts.host = prefs.getHost();
@@ -118,8 +125,8 @@ public final class ConcourseShell {
             }
             if(Strings.isNullOrEmpty(opts.password)) {
                 cash.setExpandEvents(false);
-                opts.password = cash.console.readLine("Password ["
-                        + opts.username + "]: ", '*');
+                opts.password = cash.console
+                        .readLine("Password [" + opts.username + "]: ", '*');
             }
             try {
                 cash.concourse = Concourse.connect(opts.host, opts.port,
@@ -153,7 +160,12 @@ public final class ConcourseShell {
                 }
             }
             else {
-                cash.enableInteractiveSettings();
+                try {
+                    cash.enableInteractiveSettings();
+                }
+                catch (PermissionException e) {
+                    die(e.getMessage());
+                }
                 boolean running = true;
                 String input = "";
                 while (running) {
@@ -174,12 +186,9 @@ public final class ConcourseShell {
                     catch (HelpRequest e) {
                         String text = getHelpText(e.topic);
                         if(!Strings.isNullOrEmpty(text)) {
-                            Process p = Runtime.getRuntime().exec(
-                                    new String[] {
-                                            "sh",
-                                            "-c",
-                                            "echo \"" + text
-                                                    + "\" | less > /dev/tty" });
+                            Process p = Runtime.getRuntime()
+                                    .exec(new String[] { "sh", "-c", "echo \""
+                                            + text + "\" | less > /dev/tty" });
                             p.waitFor();
                         }
                         cash.console.getHistory().removeLast();
@@ -233,13 +242,10 @@ public final class ConcourseShell {
      */
     protected static String[] getAccessibleApiMethods() {
         if(ACCESSIBLE_API_METHODS == null) {
-            Set<String> banned = Sets.newHashSet("equals", "getClass",
-                    "hashCode", "notify", "notifyAll", "toString", "wait",
-                    "exit");
             Set<String> methods = Sets.newTreeSet();
             for (Method method : Concourse.class.getMethods()) {
                 if(!Modifier.isStatic(method.getModifiers())
-                        && !banned.contains(method.getName())) {
+                        && !BANNED_API_METHODS.contains(method.getName())) {
                     // NOTE: Even though the StringCompleter strips the
                     // "concourse." from these method names, we must add it here
                     // so that we can properly handle short syntax in
@@ -319,15 +325,15 @@ public final class ConcourseShell {
                 String line;
                 while ((line = reader.readLine()) != null) {
                     line = line.replaceAll("\"", "\\\\\"");
-                    builder.append(line).append(
-                            System.getProperty("line.separator"));
+                    builder.append(line)
+                            .append(System.getProperty("line.separator"));
                 }
                 String text = builder.toString().trim();
                 reader.close();
                 return text;
             }
             catch (IOException e) {
-                throw Throwables.propagate(e);
+                throw CheckedExceptions.wrapAsRuntimeException(e);
             }
         }
     }
@@ -351,8 +357,7 @@ public final class ConcourseShell {
     private static String tryGetCorrectApiMethod(String alias) {
         String camel = CaseFormat.LOWER_UNDERSCORE.to(CaseFormat.LOWER_CAMEL,
                 alias);
-        String expanded = com.cinchapi.concourse.util.Strings.ensureStartsWith(
-                camel, "concourse.");
+        String expanded = AnyStrings.ensureStartsWith(camel, "concourse.");
         return methods.contains(expanded) && !camel.equals(alias) ? camel
                 : null;
     }
@@ -381,6 +386,23 @@ public final class ConcourseShell {
                                                                    // testing
 
     /**
+     * {@link Concourse} methods that cannot be called from the shell.
+     */
+    private static final Set<String> BANNED_API_METHODS = Sets.newHashSet(
+            "equals", "getClass", "hashCode", "notify", "notifyAll", "toString",
+            "wait", "exit", "copyConnection");
+
+    /**
+     * {@link Concourse} methods for which a {@link Closure} is defined within
+     * the shell to protect againist any short syntax corner cases.
+     */
+    private static final List<String> CLOSURE_ELIGIBLE_API_METHODS = Stream
+            .of(Reflection.getAllDeclaredMethods(Concourse.class))
+            .map(Method::getName).distinct()
+            .filter(method -> !BANNED_API_METHODS.contains(method))
+            .collect(Collectors.toList());
+
+    /**
      * A list which contains all of the accessible API methods. This list is
      * used to expand short syntax that is used in any evaluatable line.
      */
@@ -403,7 +425,8 @@ public final class ConcourseShell {
      */
     protected static List<Class<?>> IMPORTED_CLASSES = ImmutableList.of(
             Timestamp.class, Diff.class, Link.class, Tag.class, Criteria.class,
-            Operator.class); // visible for testing
+            Operator.class, Order.class, Sort.class, Page.class); // visible for
+                                                                  // testing
 
     /**
      * A closure that converts a string value to a tag.
@@ -524,7 +547,8 @@ public final class ConcourseShell {
     /**
      * A closure that responds to time/date alias functions.
      */
-    private final Closure<Timestamp> timeFunction = new Closure<Timestamp>(null) {
+    private final Closure<Timestamp> timeFunction = new Closure<Timestamp>(
+            null) {
 
         private static final long serialVersionUID = 1L;
 
@@ -563,6 +587,7 @@ public final class ConcourseShell {
      * @return the result of the evaluation
      * @throws IrregularEvaluationResult
      */
+    @SuppressWarnings("serial")
     public String evaluate(String input) throws IrregularEvaluationResult {
         input = SyntaxTools.handleShortSyntax(input, methods);
         String inputLowerCase = input.toLowerCase();
@@ -601,6 +626,19 @@ public final class ConcourseShell {
         if(script != null) {
             groovyBinding.setVariable(EXTERNAL_SCRIPT_NAME, script);
         }
+        // GH-463: Define each accessible Concourse API method as a Closure
+        // directly within Groovy to ensure that they can be called with short
+        // syntax.
+        CLOSURE_ELIGIBLE_API_METHODS.forEach(method -> {
+            groovyBinding.setVariable(method, new Closure<Object>(null) {
+
+                @Override
+                public Object call(Object... args) {
+                    return Reflection.call(concourse, method, args);
+                }
+
+            });
+        });
         if(inputLowerCase.equalsIgnoreCase("exit")) {
             throw new ExitRequest();
         }
@@ -630,8 +668,8 @@ public final class ConcourseShell {
                 long elapsed = watch.elapsed(TimeUnit.MILLISECONDS);
                 double seconds = elapsed / 1000.0;
                 if(value != null) {
-                    result.append("Returned '" + value + "' in " + seconds
-                            + " sec");
+                    result.append(
+                            "Returned '" + value + "' in " + seconds + " sec");
                 }
                 else {
                     result.append("Completed in " + seconds + " sec");
@@ -658,9 +696,12 @@ public final class ConcourseShell {
                                     + "session cannot continue");
                 }
                 else if(e instanceof MissingMethodException
-                        && ErrorCause.determine(e.getMessage()) == ErrorCause.MISSING_CASH_METHOD
-                        && ((methodCorrected = tryGetCorrectApiMethod((method = ((MissingMethodException) e)
-                                .getMethod()))) != null || hasExternalScript())) {
+                        && ErrorCause.determine(e
+                                .getMessage()) == ErrorCause.MISSING_CASH_METHOD
+                        && ((methodCorrected = tryGetCorrectApiMethod(
+                                (method = ((MissingMethodException) e)
+                                        .getMethod()))) != null
+                                || hasExternalScript())) {
                     if(methodCorrected != null) {
                         input = input.replaceAll(method, methodCorrected);
                     }
@@ -670,8 +711,16 @@ public final class ConcourseShell {
                     return evaluate(input);
                 }
                 else {
-                    String message = e.getCause() instanceof ParseException ? e
-                            .getCause().getMessage() : e.getMessage();
+                    String message;
+                    if(e.getCause() instanceof TApplicationException) {
+                        message = e.getCause().getMessage()
+                                + ". Please check server logs for more details.";
+                    }
+                    else {
+                        message = e.getCause() instanceof ParseException
+                                ? e.getCause().getMessage()
+                                : e.getMessage();
+                    }
                     throw new EvaluationException("ERROR: " + message);
                 }
             }
@@ -707,8 +756,8 @@ public final class ConcourseShell {
                 }
                 String scriptText = sb.toString();
                 try {
-                    this.script = groovy
-                            .parse(scriptText, EXTERNAL_SCRIPT_NAME);
+                    this.script = groovy.parse(scriptText,
+                            EXTERNAL_SCRIPT_NAME);
                     evaluate(scriptText);
                 }
                 catch (IrregularEvaluationResult e) {
@@ -719,16 +768,14 @@ public final class ConcourseShell {
                     msg = msg.substring(msg.indexOf('\n') + 1);
                     msg = msg.replaceAll("ext: ", "");
                     die("A fatal error occurred while parsing the run-commands file at "
-                            + script
-                            + System.getProperty("line.separator")
-                            + msg
-                            + System.getProperty("line.separator")
+                            + script + System.getProperty("line.separator")
+                            + msg + System.getProperty("line.separator")
                             + "Fix these errors or start concourse shell with the --no-run-commands flag");
                 }
             }
         }
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 
@@ -765,11 +812,11 @@ public final class ConcourseShell {
             }
 
         }));
-        CommandLine.displayWelcomeBanner();
         env = concourse.getServerEnvironment();
+        CommandLine.displayWelcomeBanner();
         setDefaultPrompt();
-        console.println("Client Version "
-                + Version.getVersion(ConcourseShell.class));
+        console.println(
+                "Client Version " + Version.getVersion(ConcourseShell.class));
         console.println("Server Version " + concourse.getServerVersion());
         console.println("");
         console.println("Connected to the '" + env + "' environment.");
@@ -800,50 +847,44 @@ public final class ConcourseShell {
 
         /**
          * A handler for the client preferences that <em>may</em> exist in the
-         * user's home directory.
+         * user's home directory. If the file is available, its contents will be
+         * used for configuration defaults.
          */
-        private ConcourseClientPreferences prefsHandler = null;
+        private ConcourseClientPreferences defaults = ConcourseClientPreferences
+                .fromUserHomeDirectory();
 
-        {
-            String file = System.getProperty("user.home") + File.separator
-                    + "concourse_client.prefs";
-            if(Files.exists(Paths.get(file))) { // check to make sure that the
-                                                // file exists first, so we
-                                                // don't create a blank one if
-                                                // it doesn't
-                prefsHandler = ConcourseClientPreferences.open(file);
-            }
-        }
-
-        @Parameter(names = { "-e", "--environment" }, description = "The environment of the Concourse Server to use")
-        public String environment = prefsHandler != null ? prefsHandler
-                .getEnvironment() : "";
+        @Parameter(names = { "-e",
+                "--environment" }, description = "The environment of the Concourse Server to use")
+        public String environment = defaults.getEnvironment();
 
         @Parameter(names = "--help", help = true, hidden = true)
         public boolean help;
 
-        @Parameter(names = { "-h", "--host" }, description = "The hostname where the Concourse Server is located")
-        public String host = prefsHandler != null ? prefsHandler.getHost()
-                : "localhost";
+        @Parameter(names = { "-h",
+                "--host" }, description = "The hostname where the Concourse Server is located")
+        public String host = defaults.getHost();
 
         @Parameter(names = "--password", description = "The password", password = false, hidden = true)
-        public String password = prefsHandler != null ? new String(
-                prefsHandler.getPasswordExplicit()) : null;
+        public String password = new String(defaults.getPasswordExplicit());
 
-        @Parameter(names = { "-p", "--port" }, description = "The port on which the Concourse Server is listening")
-        public int port = prefsHandler != null ? prefsHandler.getPort() : 1717;
+        @Parameter(names = { "-p",
+                "--port" }, description = "The port on which the Concourse Server is listening")
+        public int port = defaults.getPort();
 
-        @Parameter(names = { "-r", "--run" }, description = "The command to run non-interactively")
+        @Parameter(names = { "-r",
+                "--run" }, description = "The command to run non-interactively")
         public String run = "";
 
-        @Parameter(names = { "-u", "--username" }, description = "The username with which to connect")
-        public String username = prefsHandler != null ? prefsHandler
-                .getUsername() : "admin";
+        @Parameter(names = { "-u",
+                "--username" }, description = "The username with which to connect")
+        public String username = defaults.getUsername();
 
-        @Parameter(names = { "--run-commands", "--rc" }, description = "Path to a script that contains commands to run when the shell starts")
+        @Parameter(names = { "--run-commands",
+                "--rc" }, description = "Path to a script that contains commands to run when the shell starts")
         public String ext = FileOps.getUserHome() + "/.cashrc";
 
-        @Parameter(names = { "--no-run-commands", "--no-rc" }, description = "A flag to disable loading any run commands file")
+        @Parameter(names = { "--no-run-commands",
+                "--no-rc" }, description = "A flag to disable loading any run commands file")
         public boolean ignoreRunCommands = false;
 
         @Parameter(names = "--prefs", description = "Path to the concourse_client.prefs file")

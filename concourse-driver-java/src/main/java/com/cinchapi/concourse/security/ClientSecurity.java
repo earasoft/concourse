@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -21,8 +21,8 @@ import java.security.SecureRandom;
 import javax.crypto.Cipher;
 import javax.crypto.spec.SecretKeySpec;
 
-import com.cinchapi.concourse.util.ByteBuffers;
-import com.google.common.base.Throwables;
+import com.cinchapi.common.base.CheckedExceptions;
+import com.cinchapi.common.io.ByteBuffers;
 
 /**
  * A collection of tools to deal with security on the client. <strong>These
@@ -60,10 +60,10 @@ public class ClientSecurity {
             SecretKeySpec secretKey = new SecretKeySpec(key, "AES");
             cipher.init(Cipher.DECRYPT_MODE, secretKey);
             return ByteBuffer
-                    .wrap(cipher.doFinal(ByteBuffers.toByteArray(data)));
+                    .wrap(cipher.doFinal(ByteBuffers.getByteArray(data)));
         }
         catch (Exception e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 
@@ -82,7 +82,7 @@ public class ClientSecurity {
             return ByteBuffer.wrap(cipher.doFinal(data));
         }
         catch (Exception e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 
@@ -94,7 +94,7 @@ public class ClientSecurity {
      * @return the encrypted payload
      */
     public static ByteBuffer encrypt(ByteBuffer data, byte[] key) {
-        return encrypt(ByteBuffers.toByteArray(data), key);
+        return encrypt(ByteBuffers.getByteArray(data), key);
     }
 
     /**

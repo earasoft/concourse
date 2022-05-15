@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,13 +15,14 @@
  */
 package com.cinchapi.concourse.test;
 
-import com.cinchapi.concourse.util.PrettyLinkedTableMap;
 import org.junit.runner.RunWith;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.cinchapi.concourse.test.runners.CrossVersionTestRunner;
 import com.cinchapi.concourse.test.runners.CrossVersionTestRunner.Versions;
+import com.cinchapi.concourse.util.PrettyLinkedTableMap;
+import com.cinchapi.concourse.util.PrettyTableMap;
 
 /**
  * A {@link CrossVersionTest} is one that runs against multiple versions of
@@ -52,8 +53,8 @@ public abstract class CrossVersionTest extends ClientServerTest {
      * version. These stats are printed at the end of the entire test run to
      * provide an easy view of comparative metrics.
      */
-    private static PrettyLinkedTableMap<String, String, Object> stats = PrettyLinkedTableMap
-            .newPrettyLinkedTableMap("Version");
+    private static PrettyTableMap<String, String, Object> stats = PrettyLinkedTableMap
+            .create("Version");
 
     @Override
     protected void beforeEachTest() {

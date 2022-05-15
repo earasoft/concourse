@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -17,11 +17,15 @@ package com.cinchapi.concourse.server.io;
 
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.channels.FileChannel.MapMode;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Collection;
 import java.util.Iterator;
 
-import com.cinchapi.concourse.util.ByteBuffers;
+import com.cinchapi.common.io.ByteBuffers;
+import com.cinchapi.concourse.collect.CloseableIterator;
 import com.google.common.base.Preconditions;
 
 /**
@@ -59,6 +63,95 @@ public class ByteableCollections {
     }
 
     /**
+     * Return an {@link Iterator} that will traverse the bytes in
+     * {@code channel} and return a series of {@link ByteBuffer byte buffers},
+     * each of which can be used to reconstruct a {@link Byteable} object.
+     * Unlike the {@link #iterator(ByteBuffer)} method, this one only reads
+     * {@link bufferSize} bytes from disk at a time, which is necessary when its
+     * infeasible to read the entire file into memory at once.
+     * 
+     * <p>
+     * <strong>Warning:</strong> {@link ByteBuffer ByteBuffers} that are
+     * returned from {@link #next()} should <strong>not</strong> be stored in
+     * memory or assumed to be long-lived (e.g. each call to {@link #next()} may
+     * invalidate or change the state of the previously returned
+     * {@link ByteBuffer}. If streamed {@link ByteBuffer ByteBuffers} need to be
+     * accessed after processing, make a copy of the value returned from
+     * {@link #next()}.
+     * </p>
+     * 
+     * @param channel
+     * @param position the channel index from which to start reading
+     * @param length
+     * @param bufferSize
+     * @return the {@link Iterator}
+     */
+    public static CloseableIterator<ByteBuffer> stream(FileChannel channel,
+            long position, long length, int bufferSize) {
+        return ByteableCollectionStreamIterator.from(channel, position, length,
+                bufferSize);
+    }
+
+    /**
+     * Return an {@link Iterator} that will traverse the bytes in {@code file}
+     * and return a series of {@link ByteBuffer byte buffers}, each of which can
+     * be used to reconstruct a {@link Byteable} object. Unlike the
+     * {@link #iterator(ByteBuffer)} method, this one only reads
+     * {@link bufferSize} bytes from disk at a time, which is necessary when its
+     * infeasible to read the entire file into memory at once.
+     * 
+     * <p>
+     * <strong>Warning:</strong> {@link ByteBuffer ByteBuffers} that are
+     * returned from {@link #next()} should <strong>not</strong> be stored in
+     * memory or assumed to be long-lived (e.g. each call to {@link #next()} may
+     * invalidate or change the state of the previously returned
+     * {@link ByteBuffer}. If streamed {@link ByteBuffer ByteBuffers} need to be
+     * accessed after processing, make a copy of the value returned from
+     * {@link #next()}.
+     * </p>
+     * 
+     * @param file
+     * @param bufferSize
+     * @return the {@link Iterator}
+     */
+    public static CloseableIterator<ByteBuffer> stream(Path file,
+            int bufferSize) {
+        return ByteableCollectionStreamIterator.from(
+                FileSystem.getFileChannel(file), 0,
+                FileSystem.getFileSize(file.toString()), bufferSize);
+    }
+
+    /**
+     * Return an {@link Iterator} that will traverse the bytes in {@code file}
+     * and return a series of {@link ByteBuffer byte buffers}, each of which can
+     * be used to reconstruct a {@link Byteable} object. Unlike the
+     * {@link #iterator(ByteBuffer)} method, this one only reads
+     * {@link bufferSize} bytes from disk at a time, which is necessary when its
+     * infeasible to read the entire file into memory at once.
+     * 
+     * <p>
+     * <strong>Warning:</strong> {@link ByteBuffer ByteBuffers} that are
+     * returned from {@link #next()} should <strong>not</strong> be stored in
+     * memory or assumed to be long-lived (e.g. each call to {@link #next()} may
+     * invalidate or change the state of the previously returned
+     * {@link ByteBuffer}. If streamed {@link ByteBuffer ByteBuffers} need to be
+     * accessed after processing, make a copy of the value returned from
+     * {@link #next()}.
+     * </p>
+     * 
+     * @param file
+     * @param position the file index from which to start reading
+     * @param length
+     * @param bufferSize
+     * @return the {@link Iterator}
+     */
+    public static CloseableIterator<ByteBuffer> stream(Path file, long position,
+            long length, int bufferSize) {
+        return ByteableCollectionStreamIterator.from(
+                FileSystem.getFileChannel(file), position, length, bufferSize);
+    }
+
+    /**
      * Return an {@link Iterator} that will traverse the bytes in {@code file}
      * and return a series of {@link ByteBuffer byte buffers}, each of which can
      * be used to reconstruct a {@link Byteable} object. Unlike the
@@ -67,31 +160,37 @@ public class ByteableCollections {
      * infeasible to read the entire file into memory at once.
      * 
      * @param file
+     * @param position the file index from which to start reading
+     * @param length the total number of bytes to read before determining that
+     *            there are no more elements
      * @param bufferSize - must be large enough to accommodate the largest
      *            element that will be returned by the iterator
      * @return the iterator
+     * @deprecated use {@link #stream(Path, long, long, int)} instead
      */
-    public static Iterator<ByteBuffer> streamingIterator(final String file,
-            final int bufferSize) {
+    @Deprecated
+    public static Iterator<ByteBuffer> streamingIterator(Path file,
+            long position, long length, int bufferSize) {
         return new Iterator<ByteBuffer>() {
 
-            private long bufSize;
+            private long bufSize = bufferSize;
             private boolean expandBuffer = false;
-            private long fileSize = FileSystem.getFileSize(file);
+            private long index = position;
             private Iterator<ByteBuffer> it = null;
-            private long position = 0;
+            private long limit = index + length;
+
             {
-                bufSize = bufferSize;
+
                 adjustBuffer();
             }
 
             @Override
             public boolean hasNext() {
                 ByteBuffer backingBytes = ((ByteableCollectionIterator) it).bytes;
-                if(position < fileSize && it.hasNext()) {
+                if(index < limit && it.hasNext()) {
                     return true;
                 }
-                else if(position < fileSize && fileSize - position >= 4) {
+                else if(index < limit && limit - index >= 4) {
                     if(backingBytes.remaining() >= 4) {
                         // In order to know if we've reached a state where the
                         // remaining bytes in the file are null, we need to peek
@@ -119,7 +218,7 @@ public class ByteableCollections {
             public ByteBuffer next() {
                 try {
                     ByteBuffer next = it.next();
-                    position += next.capacity() + 4;
+                    index += next.capacity() + 4;
                     expandBuffer = false;
                     return next;
                 }
@@ -135,7 +234,7 @@ public class ByteableCollections {
             }
 
             /**
-             * Fill the {@link #buffer} with the smaller of the remaining bytes
+             * Fill the {@link #limbo} with the smaller of the remaining bytes
              * in the file of {@code bufferSize} bytes from the current
              * {@code position}.
              */
@@ -143,11 +242,32 @@ public class ByteableCollections {
                 if(expandBuffer) {
                     bufSize *= 2;
                 }
-                it = iterator(FileSystem.map(file, MapMode.READ_ONLY, position,
-                        Math.min(fileSize - position, bufSize)));
+                it = iterator(FileSystem.map(file, MapMode.READ_ONLY, index,
+                        Math.min(limit - index, bufSize)));
             }
 
         };
+    }
+
+    /**
+     * Return an {@link Iterator} that will traverse the bytes in {@code file}
+     * and return a series of {@link ByteBuffer byte buffers}, each of which can
+     * be used to reconstruct a {@link Byteable} object. Unlike the
+     * {@link #iterator(ByteBuffer)} method, this one only reads
+     * {@link bufferSize} bytes from disk at a time, which is necessary when its
+     * infeasible to read the entire file into memory at once.
+     * 
+     * @param file
+     * @param bufferSize - must be large enough to accommodate the largest
+     *            element that will be returned by the iterator
+     * @return the iterator
+     * @deprecated use {@link #stream(Path, int)} instead
+     */
+    @Deprecated
+    public static Iterator<ByteBuffer> streamingIterator(final String file,
+            final int bufferSize) {
+        return streamingIterator(Paths.get(file), 0,
+                FileSystem.getFileSize(file), bufferSize);
     }
 
     /**
@@ -188,8 +308,8 @@ public class ByteableCollections {
         for (Byteable object : collection) {
             Preconditions.checkArgument(object.size() == sizePerElement,
                     "'%s' must be '%s' bytes but it is "
-                            + "actually '%s' bytes", object, sizePerElement,
-                    object.size());
+                            + "actually '%s' bytes",
+                    object, sizePerElement, object.size());
             object.copyTo(buffer);
         }
         buffer.rewind();
@@ -269,8 +389,8 @@ public class ByteableCollections {
      * 
      * @author Jeff Nelson
      */
-    private static class FixedSizeByteableCollectionIterator extends
-            ByteableCollectionIterator {
+    private static class FixedSizeByteableCollectionIterator
+            extends ByteableCollectionIterator {
 
         private int nextSequence = 0;
         private final int numSequences;
@@ -314,7 +434,8 @@ public class ByteableCollections {
 
         private void readFixedNext() {
             next = null;
-            if(nextSequence < numSequences && bytes.remaining() >= sequenceSize) {
+            if(nextSequence < numSequences
+                    && bytes.remaining() >= sequenceSize) {
                 next = ByteBuffers.slice(bytes, bytes.position(), sequenceSize);
             }
         }

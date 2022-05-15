@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,19 +15,23 @@
  */
 package com.cinchapi.concourse;
 
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+
 import org.junit.Assert;
 import org.junit.Test;
-import com.cinchapi.concourse.Concourse;
-import com.cinchapi.concourse.ConnectionPool;
+
+import com.cinchapi.common.base.CheckedExceptions;
+import com.cinchapi.concourse.server.concurrent.Threads;
 import com.cinchapi.concourse.test.ConcourseIntegrationTest;
 import com.cinchapi.concourse.util.Environments;
 import com.cinchapi.concourse.util.TestData;
 import com.google.common.base.Strings;
-import com.google.common.base.Throwables;
+import com.google.common.collect.Lists;
 
 /**
- * Unit tests for {@link ConnectionPool}.
- * 
+ * Unit tests for {@link com.cinchapi.concourse.ConnectionPool}.
+ *
  * @author Jeff Nelson
  */
 public abstract class ConnectionPoolTest extends ConcourseIntegrationTest {
@@ -37,7 +41,8 @@ public abstract class ConnectionPoolTest extends ConcourseIntegrationTest {
     protected static final String PASSWORD = "admin";
 
     /**
-     * The {@link ConnectionPool} which is instantiated and clean up before and
+     * The {@link com.cinchapi.concourse.ConnectionPool} which is instantiated
+     * and clean up before and
      * after each test.
      */
     protected ConnectionPool connections = null;
@@ -123,7 +128,7 @@ public abstract class ConnectionPoolTest extends ConcourseIntegrationTest {
                     }
                 }
                 catch (Exception e) {
-                    throw Throwables.propagate(e);
+                    throw CheckedExceptions.wrapAsRuntimeException(e);
                 }
             }
 
@@ -149,17 +154,58 @@ public abstract class ConnectionPoolTest extends ConcourseIntegrationTest {
         Assert.assertTrue(connections.isClosed());
     }
 
+    @Test
+    public void testRequestReleaseRaceCondition() {
+        AtomicBoolean done = new AtomicBoolean(false);
+        AtomicBoolean passed = new AtomicBoolean(true);
+        List<Thread> threads = Lists.newArrayList();
+        for (int i = 0; i < 10; ++i) {
+            Thread t = new Thread(() -> {
+                while (!done.get()) {
+                    Concourse connection = connections.request();
+                    try {
+                        connection.add("name", "jeff");
+                    }
+                    finally {
+                        try {
+                            connections.release(connection);
+                        }
+                        catch (IllegalArgumentException e) {
+                            e.printStackTrace();
+                            passed.set(false);
+                        }
+                    }
+                }
+            });
+            t.start();
+            threads.add(t);
+        }
+        Threads.sleep(1000);
+        done.set(true);
+        Assert.assertTrue(passed.get());
+        threads.forEach(t -> {
+            try {
+                t.join();
+            }
+            catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        });
+    }
+
     /**
-     * Return a {@link ConnectionPool} to use in a unit test.
-     * 
+     * Return a {@link com.cinchapi.concourse.ConnectionPool} to use in a unit
+     * test.
+     *
      * @return the ConnectionPool
      */
     protected abstract ConnectionPool getConnectionPool();
 
     /**
-     * Return a {@link ConnectionPool} connected to {@code env} to use in a unit
-     * test.
-     * 
+     * Return a {@link com.cinchapi.concourse.ConnectionPool} connected to
+     * {@code env} to use in a
+     * unit test.
+     *
      * @param env
      * @return the ConnectionPool
      */

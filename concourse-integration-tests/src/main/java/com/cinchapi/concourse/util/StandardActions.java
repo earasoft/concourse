@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
+ * Copyright (c) 2013-2022 Cinchapi Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,12 +21,11 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.util.concurrent.TimeUnit;
 
+import com.cinchapi.common.base.CheckedExceptions;
 import com.cinchapi.concourse.Concourse;
 import com.cinchapi.concourse.server.ConcourseServer;
 import com.cinchapi.concourse.server.io.FileSystem;
 import com.cinchapi.concourse.time.Time;
-import com.cinchapi.concourse.util.TestData;
-import com.google.common.base.Throwables;
 
 /**
  * This class contains a collection of actions that are common and potentially
@@ -57,8 +56,8 @@ public final class StandardActions {
     public static void importWordsDotText(Concourse client) {
         System.out.println("Importing words.txt...");
         try {
-            File file = new File(TestData.class.getResource("/words.txt")
-                    .getFile());
+            File file = new File(
+                    TestData.class.getResource("/words.txt").getFile());
             BufferedReader reader = new BufferedReader(new FileReader(file));
             String line;
             int record = 0;
@@ -69,19 +68,20 @@ public final class StandardActions {
             reader.close();
         }
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
-    
+
     /**
      * Import 1027 youtube links
+     * 
      * @param client
      */
-    public static void import1027YoutubeLinks(Concourse client){
+    public static void import1027YoutubeLinks(Concourse client) {
         System.out.println("Importing 1027 youtube links");
         try {
-            File file = new File(TestData.class.getResource("/youtube.txt")
-                    .getFile());
+            File file = new File(
+                    TestData.class.getResource("/youtube.txt").getFile());
             BufferedReader reader = new BufferedReader(new FileReader(file));
             String line;
             int record = 0;
@@ -92,7 +92,7 @@ public final class StandardActions {
             reader.close();
         }
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 
@@ -121,17 +121,17 @@ public final class StandardActions {
                 + File.separator + "java";
         String home = "-Duser.dir=" + System.getProperty("user.dir")
                 + File.separator + "conf";
-        SERVER_HOME_DIRECTORY = System.getProperty("user.home")
-                + File.separator + "concourse_" + Time.now();
+        SERVER_HOME_DIRECTORY = System.getProperty("user.home") + File.separator
+                + "concourse_" + Time.now();
         try {
             SERVER_PROCESS = new ProcessBuilder(java, "-Xms512m", "-Xmx1024m",
-                    "-Declipse=true", home, "-Duser.home="
-                            + SERVER_HOME_DIRECTORY, "-cp", classpath,
+                    "-Declipse=true", home,
+                    "-Duser.home=" + SERVER_HOME_DIRECTORY, "-cp", classpath,
                     ConcourseServer.class.getName()).start();
             System.out.println("Launched server in separate JVM");
         }
         catch (Exception e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 
@@ -148,7 +148,7 @@ public final class StandardActions {
             unit.sleep(duration);
         }
         catch (InterruptedException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 

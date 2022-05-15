@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
+ * Copyright (c) 2013-2022 Cinchapi Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,11 +25,9 @@ import org.junit.Assert;
 import org.junit.Test;
 import org.junit.experimental.theories.Theory;
 
+import com.cinchapi.ccl.type.function.IndexFunction;
 import com.cinchapi.concourse.Tag;
 import com.cinchapi.concourse.server.model.Value;
-import com.cinchapi.concourse.server.storage.Action;
-import com.cinchapi.concourse.server.storage.BufferedStore;
-import com.cinchapi.concourse.server.storage.Engine;
 import com.cinchapi.concourse.server.storage.temp.Write;
 import com.cinchapi.concourse.test.Variables;
 import com.cinchapi.concourse.thrift.Operator;
@@ -46,9 +44,11 @@ import com.google.common.collect.Sets;
 import com.google.common.collect.Table;
 
 /**
- * Unit tests for {@link BufferedStore} that try to stress scenarios that occur
- * when data offsetting data is split between the destination and buffer.
- * 
+ * Unit tests for {@link com.cinchapi.concourse.server.storage.BufferedStore}
+ * that try to stress
+ * scenarios that occur when data offsetting data is split between the
+ * destination and buffer.
+ *
  * @author Jeff Nelson
  */
 public abstract class BufferedStoreTest extends StoreTest {
@@ -90,7 +90,8 @@ public abstract class BufferedStoreTest extends StoreTest {
      * @return a Table with the data
      */
     @SuppressWarnings("unused")
-    private Table<Long, String, Set<TObject>> convertDataToTable(List<Data> data) {
+    private Table<Long, String, Set<TObject>> convertDataToTable(
+            List<Data> data) {
         Table<Long, String, Set<TObject>> table = HashBasedTable.create();
         Iterator<Data> it = data.iterator();
         while (it.hasNext()) {
@@ -204,6 +205,53 @@ public abstract class BufferedStoreTest extends StoreTest {
     }
 
     @Test
+    public void testVerifyBufferedReproBuild3885() {
+        // @formatter:off
+        String order = ""
+                + "ADD C AS three IN 3, "
+                + "ADD D AS eight IN 1, "
+                + "REMOVE D AS eight IN 1, "
+                + "ADD A AS three IN 6, "
+                + "ADD A AS nine IN 2, "
+                + "ADD A AS one IN 1, "
+                + "ADD D AS six IN 2, "
+                + "ADD B AS six IN 6, "
+                + "ADD B AS two IN 2, "
+                + "REMOVE B AS two IN 2, "
+                + "ADD B AS four IN 7, "
+                + "REMOVE B AS four IN 7, "
+                + "ADD D AS four IN 4, "
+                + "REMOVE A AS three IN 6, "
+                + "ADD C AS seven IN 7, "
+                + "REMOVE D AS four IN 4, "
+                + "ADD D AS two IN 5, "
+                + "REMOVE B AS six IN 6, "
+                + "ADD C AS one IN 4, "
+                + "ADD C AS five IN 1, "
+                + "REMOVE C AS one IN 4, "
+                + "ADD B AS ten IN 3, "
+                + "REMOVE D AS two IN 5, "
+                + "ADD A AS five IN 5, "
+                + "REMOVE A AS five IN 5, "
+                + "REMOVE C AS seven IN 7, "
+                + "REMOVE B AS ten IN 3, "
+                + "REMOVE C AS three IN 3, "
+                + "REMOVE A AS nine IN 2, "
+                + "REMOVE A AS one IN 1";
+        // @formatter:on
+        String[] parts = order.split(",");
+        List<Data> data = Lists.newArrayList();
+        for (String part : parts) {
+            part = part.trim();
+            data.add(Data.fromString(part));
+        }
+        Data d = Data.fromString("REMOVE C AS three IN 3");
+        insertData(data, 5);
+        boolean verify = Numbers.isOdd(count(data, d));
+        Assert.assertEquals(verify, store.verify(d.key, d.value, d.record));
+    }
+
+    @Test
     public void testVerifyBufferedReproBuild634() {
         String order = "ADD D AS ten IN 6, ADD D AS eight "
                 + "IN 7, ADD C AS five IN 1, ADD D AS two "
@@ -242,7 +290,6 @@ public abstract class BufferedStoreTest extends StoreTest {
         insertData(data, 54);
         boolean verify = Numbers.isOdd(count(data, d));
         Assert.assertEquals(verify, store.verify(d.key, d.value, d.record));
-
     }
 
     @Test
@@ -273,12 +320,18 @@ public abstract class BufferedStoreTest extends StoreTest {
         TObject tag = Convert.javaToThrift(Tag.create("A"));
         TObject string = Convert.javaToThrift("A");
         data.add(d = (Data.positive("foo", tag, 1)));
-        data.add(Data.positive("foo", Convert.javaToThrift(Tag.create("B")), 1));
+        data.add(
+                Data.positive("foo", Convert.javaToThrift(Tag.create("B")), 1));
         data.add(Data.negative(d));
         insertData(data, 2);
         Assert.assertFalse(store.select("foo", 1).contains(string));
         Assert.assertFalse(store.select("foo", 1).contains(tag));
+    }
 
+    @Test(expected = IllegalArgumentException.class)
+    public void testCannotWriteFunction() {
+        add("foo", Convert.javaToThrift(new IndexFunction("average", "age")),
+                1);
     }
 
     /**
@@ -305,7 +358,8 @@ public abstract class BufferedStoreTest extends StoreTest {
      * @param d
      * @param operator
      */
-    private void doTestFindBuffered(List<Data> data, Data d, Operator operator) {
+    private void doTestFindBuffered(List<Data> data, Data d,
+            Operator operator) {
         Variables.register("d", d);
         Variables.register("operator", operator);
         Map<Long, Set<TObject>> rtv = Maps.newHashMap();
@@ -406,8 +460,8 @@ public abstract class BufferedStoreTest extends StoreTest {
         List<Data> posData = Lists.newArrayList();
         List<Data> negData = Lists.newArrayList();
         for (int i = 0; i < numNegData; i++) {
-            Data pos = Data
-                    .positive(keys.next(), values.next(), records.next());
+            Data pos = Data.positive(keys.next(), values.next(),
+                    records.next());
             Data neg = Data.negative(pos);
             posData.add(pos);
             negData.add(neg);
@@ -418,8 +472,8 @@ public abstract class BufferedStoreTest extends StoreTest {
         // adds that aren't offset
         int numAddlPosData = TestData.getScaleCount() % POSSIBLE_KEYS.size();
         for (int i = 0; i < numAddlPosData; i++) {
-            Data pos = Data
-                    .positive(keys.next(), values.next(), records.next());
+            Data pos = Data.positive(keys.next(), values.next(),
+                    records.next());
             posData.add(pos);
         }
 
@@ -474,12 +528,12 @@ public abstract class BufferedStoreTest extends StoreTest {
         for (int i = 0; i < numForDestination; i++) {
             Data d = it.next();
             if(d.type == Action.ADD) {
-                ((BufferedStore) store).destination.accept(Write.add(d.key,
-                        d.value, d.record));
+                ((BufferedStore) store).durable
+                        .accept(Write.add(d.key, d.value, d.record));
             }
             else {
-                ((BufferedStore) store).destination.accept(Write.remove(d.key,
-                        d.value, d.record));
+                ((BufferedStore) store).durable
+                        .accept(Write.remove(d.key, d.value, d.record));
             }
             if(store instanceof Engine) { // The Engine uses the inventory to
                                           // check if records exist when
@@ -494,12 +548,12 @@ public abstract class BufferedStoreTest extends StoreTest {
         while (it.hasNext()) {
             Data d = it.next();
             if(d.type == Action.ADD) {
-                ((BufferedStore) store).buffer.insert(Write.add(d.key, d.value,
-                        d.record));
+                ((BufferedStore) store).limbo
+                        .insert(Write.add(d.key, d.value, d.record));
             }
             else {
-                ((BufferedStore) store).buffer.insert(Write.remove(d.key,
-                        d.value, d.record));
+                ((BufferedStore) store).limbo
+                        .insert(Write.remove(d.key, d.value, d.record));
             }
         }
     }

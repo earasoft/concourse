@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -22,6 +22,7 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 import java.lang.reflect.Field;
 import java.text.MessageFormat;
+import java.util.Collections;
 import java.util.List;
 
 import org.junit.runner.Description;
@@ -32,9 +33,10 @@ import org.junit.runners.ParentRunner;
 import org.junit.runners.model.FrameworkMethod;
 import org.junit.runners.model.InitializationError;
 
+import com.cinchapi.common.base.CheckedExceptions;
+import com.cinchapi.common.reflect.Reflection;
 import com.cinchapi.concourse.test.CrossVersionTest;
 import com.cinchapi.concourse.util.PrettyLinkedTableMap;
-import com.google.common.base.Throwables;
 import com.google.common.collect.Lists;
 
 /**
@@ -57,12 +59,19 @@ public class CrossVersionTestRunner extends ParentRunner<Runner> {
     private static String[] getAnnotatedVersions(Class<?> klass)
             throws InitializationError {
         Versions annotation = klass.getAnnotation(Versions.class);
-        if(annotation == null) {
-            throw new InitializationError(String.format(
-                    "class '%s' must have a Versions annotation",
-                    klass.getName()));
+        String[] versions = annotation != null ? annotation.value() : null;
+        if(versions == null) {
+            try {
+                versions = Reflection.callStatic(klass, "versions");
+            }
+            catch (Exception e) {} ;
         }
-        return annotation.value();
+        if(versions == null) {
+            throw new InitializationError(
+                    String.format("class '%s' must have a Versions annotation",
+                            klass.getName()));
+        }
+        return versions;
     }
 
     /**
@@ -119,12 +128,13 @@ public class CrossVersionTestRunner extends ParentRunner<Runner> {
 
             });
         }
+        Collections.shuffle(runners);
     }
 
     @Override
     public Description getDescription() {
-        Description description = Description.createSuiteDescription(super
-                .getDescription().getTestClass());
+        Description description = Description
+                .createSuiteDescription(super.getDescription().getTestClass());
         for (Runner runner : runners) {
             description.addChild(runner.getDescription());
         }
@@ -145,6 +155,7 @@ public class CrossVersionTestRunner extends ParentRunner<Runner> {
     @SuppressWarnings("unchecked")
     protected void runChild(Runner child, RunNotifier notifier) {
         child.run(notifier);
+        System.gc();
         if(runners.indexOf(child) == runners.size() - 1) {
             Field field = null;
             Class<?> clazz = ((BlockJUnit4ClassRunner) child).getTestClass()
@@ -170,7 +181,7 @@ public class CrossVersionTestRunner extends ParentRunner<Runner> {
                     }
                 }
                 catch (Exception e) {
-                    throw Throwables.propagate(e);
+                    throw CheckedExceptions.wrapAsRuntimeException(e);
                 }
             }
         }

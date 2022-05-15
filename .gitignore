@@ -44,6 +44,11 @@ Thumbs.db
 *.classpath
 *.project
 
+# IDEA generated files #
+########################
+*.iml
+*.idea/
+
 # Project metadata #
 ####################
 *test.out*
@@ -66,3 +71,4 @@ Thumbs.db
 ###########################
 *scratch.*
 *Scratch.*
+Dockerfile.onbuild.temp

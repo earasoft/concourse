@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,162 +15,144 @@
  */
 package com.cinchapi.concourse.server.http;
 
-import com.cinchapi.concourse.plugin.http.HttpCallable;
-import com.cinchapi.concourse.server.GlobalState;
+import javax.annotation.Nullable;
+
 import com.cinchapi.concourse.thrift.AccessToken;
 import com.cinchapi.concourse.thrift.TransactionToken;
-import com.cinchapi.concourse.util.Logger;
-import com.cinchapi.concourse.util.ObjectUtils;
-import com.cinchapi.concourse.util.Reflection;
-import com.google.common.base.MoreObjects;
-import com.google.common.base.Preconditions;
-import com.google.common.base.Strings;
-import com.google.common.primitives.Longs;
-
-import spark.Request;
-import spark.Response;
-import spark.template.MustacheTemplateRoute;
+import com.google.gson.JsonObject;
 
 /**
- * An {@link Endpoint} defines logic to handle an HTTP request that is made to a
- * certain path.
+ * An {@link Endpoint} is the most basic construct in the HTTP framework. An
+ * Endpoint is uniquely identifiable and accessible from a <em<route</em> that
+ * is made up of an HTTP verb/action and a URI.
  * <p>
- * This class provides some utility functions around some of the native route
- * components with a cleaner interface.
+ * An Endpoint's route can be provided upon
+ * {@link Endpoint#Endpoint(String, String) construction} or it can be inferred
+ * from the name of the instance variable to which the Endpoint is bound in an
+ * {@link EndpointContainer}.
  * </p>
- * <h2>Preconditions</h2>
- * <ul>
- * <li>Use the {@link #require(Object...)} method to ensure that the necessary
- * variables are all non-empty before continuing in the route, halting if the
- * check fails.</li>
- * </ul>
- * <h2>Redirection</h2>
- * <ul>
- * <li>Use the {@link Response#redirect(String) response.redirect(String)}
- * method to trigger a browser redirect to another location</li>
- * </ul>
+ * <p>
+ * When declaring Endpoints anonymously within an {@link EndpointContainer}, be
+ * sure to use variable names that conform to the roting spec.
+ * </p>
  * 
  * @author Jeff Nelson
  */
-// NOTE: We are extending the MustacheTemplateRoute this high up in the chain so
-// that View subclasses can access the necessary methods while also benefiting
-// from some of the non-view scaffolding that happens in this and other bases
-// classes.
-public abstract class Endpoint extends MustacheTemplateRoute implements
-        HttpCallable {
+public abstract class Endpoint {
 
     /**
-     * Check to ensure that none of the specified {@link params} is {@code null}
-     * or an empty string or an empty collection. If so, halt
-     * the request immediately.
-     * 
-     * @param params
+     * Create an {@link Endpoint} that is bound to a variable whose name is used
+     * to assign the {@link #getAction() action} and {@link #getPath() path}.
      */
-    protected static final void require(Object... params) {
-        for (Object param : params) {
-            if(ObjectUtils.isNullOrEmpty(param)) {
-                halt(400, "Request is missing a required parameter");
-            }
-        }
+    public Endpoint() {
+        this(null, null);
     }
 
     /**
-     * A flag that tracks whether path for this Endpoint has been
-     * {@link #setPath(String) set}.
+     * Create an {@link Endpoint} that uses the provided {@code action} and
+     * {@code path}.
+     * 
+     * @param action the HTTP verb to which this {@link Endpoint} responds
+     * @param path the relative path of the {@link Endpoint}
      */
-    private boolean hasPath = false;
+    public Endpoint(String action, String path) {
+        this.action = action;
+        this.path = path;
+    }
 
     /**
-     * The HTTP verb that is served by this Endpoint.
+     * A {@link JsonElement} that represents the lack of any data being
+     * returned.
+     */
+    protected static JsonObject NO_DATA = new JsonObject();
+
+    /**
+     * The HTTP verb to which this endpoint responds.
      */
     private String action;
 
     /**
-     * Construct a new instance.
-     * 
-     * @param relativePath
+     * The full URI at which this endpoint is reachable.
      */
-    protected Endpoint() {
-        super(""); // The path is set by the Router using the #setPath method
-    }
-
-    @Override
-    public final Object handle(Request request, Response response) {
-        // The HttpRequests preprocessor assigns attributes to the request in
-        // order for the Endpoint to make calls into ConcourseServer.
-        AccessToken creds = (AccessToken) request
-                .attribute(GlobalState.HTTP_ACCESS_TOKEN_ATTRIBUTE);
-        String environment = MoreObjects.firstNonNull((String) request
-                .attribute(GlobalState.HTTP_ENVIRONMENT_ATTRIBUTE),
-                GlobalState.DEFAULT_ENVIRONMENT);
-        String fingerprint = (String) request
-                .attribute(GlobalState.HTTP_FINGERPRINT_ATTRIBUTE);
-
-        // Check basic authentication: is an AccessToken present and does the
-        // fingerprint match?
-        if((boolean) request.attribute(GlobalState.HTTP_REQUIRE_AUTH_ATTRIBUTE)
-                && creds == null) {
-            halt(401);
-        }
-        if(!Strings.isNullOrEmpty(fingerprint)
-                && !fingerprint.equals(HttpRequests.getFingerprint(request))) {
-            Logger.warn(
-                    "Request made with mismatching fingerprint. Expecting {} but got {}",
-                    HttpRequests.getFingerprint(request), fingerprint);
-            halt(401);
-        }
-        TransactionToken transaction = null;
-        try {
-            Long timestamp = Longs.tryParse((String) request
-                    .attribute(GlobalState.HTTP_TRANSACTION_TOKEN_ATTRIBUTE));
-            transaction = creds != null && timestamp != null ? new TransactionToken(
-                    creds, timestamp) : transaction;
-        }
-        catch (NullPointerException e) {}
-        return handle(request, response, creds, transaction, environment);
-    }
+    private String path;
 
     /**
-     * Handle the request that has been made to the path that corresponds to
-     * this {@link Endpoint}.
+     * Return the HTTP verb/action to which this endpoint responds.
+     * <p>
+     * This value is configured using {@link #setAction(String)}.
+     * </p>
      * 
-     * @param request
-     * @param response
-     * @param creds
-     * @param transaction
-     * @param environment
-     * @return the content to be set in the response
+     * @return the action for this Endpoint
      */
-    protected abstract Object handle(Request request, Response response,
-            AccessToken creds, TransactionToken transaction, String environment);
-
-    /**
-     * Return the path for this Endpoint.
-     * 
-     * @return the path
-     */
-    // NOTE: This method is called "path" instead of "getPath" because a parent
-    // class already has a package private class named "getPath"
-    protected String path() {
-        return Reflection.get("path", this);
-    }
-
-    @Override
-    public void setPath(String path) {
-        Preconditions.checkState(!hasPath,
-                "The path for the endpoint has already been set");
-        path = (path.startsWith("/") ? path : "/" + path).toLowerCase();
-        Reflection.set("path", path, this);
-        hasPath = true;
-    }
-
-    @Override
-    public void setAction(String action) {
-        this.action = action;
-    }
-    
-    @Override
-    public String getAction(){
+    public String getAction() {
         return action;
+    }
+
+    /**
+     * Return the content type that this {@link Endpoint} returns from the
+     * {@link #serve(HttpRequest, HttpResponse, AccessToken, TransactionToken, String)}
+     * method.
+     * 
+     * @return the content type
+     */
+    public ContentType getContentType() {
+        return ContentType.JSON;
+    }
+
+    /**
+     * Return the path at which this endpoint is reachable.
+     * 
+     * @return the path for this Endpoint
+     */
+    public String getPath() {
+        return path;
+    }
+
+    /**
+     * Serve the {@code request} and return the appropriate payload with the
+     * {@code response}.
+     * 
+     * <p>
+     * If this method returns, it is assumed that the request was successful.
+     * If, for any reason, an error occurs, this method should throw an
+     * Exception and it will be wrapped in the appropriate response for the
+     * caller.
+     * </p>
+     * 
+     * @param request an {@link HttpRequest object} that contains all the
+     *            information about the request
+     * @param response an {@link HttpResponse object} that contains all the
+     *            information that should be issued within the response
+     * @param creds an {@link AccessToken} for the authenticated user, if a user
+     *            session exists
+     * @param transaction a {@link TransactionToken} for appropriately routing
+     *            the data actions
+     * @param environment the environment of the {@link ConcourseRuntime} in
+     *            which the data action should occur
+     * @return the payload
+     * @throws Exception
+     */
+    public abstract String serve(HttpRequest request, HttpResponse response,
+            @Nullable AccessToken creds, @Nullable TransactionToken transaction,
+            String environment) throws Exception;
+
+    /**
+     * Items that can be returned from the {@link Endpoint#getContentType()}
+     * method.
+     * 
+     * @author Jeff Nelson
+     */
+    public enum ContentType {
+        JSON;
+
+        @Override
+        public String toString() {
+            switch (this) {
+            case JSON:
+                return "application/json";
+            default:
+                return "text/html";
+            }
+        }
     }
 }

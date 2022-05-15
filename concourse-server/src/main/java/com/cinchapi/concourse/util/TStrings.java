@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,12 +15,13 @@
  */
 package com.cinchapi.concourse.util;
 
-import java.util.List;
 import org.apache.commons.lang.StringUtils;
 
+import com.cinchapi.common.base.AnyStrings;
+import com.cinchapi.common.base.Array;
+import com.cinchapi.common.base.ArrayBuilder;
+import com.cinchapi.common.base.StringSplitter;
 import com.cinchapi.concourse.server.GlobalState;
-import com.cinchapi.concourse.util.StringSplitter;
-import com.google.common.collect.Lists;
 
 /**
  * String based utility functions that depend on proprietary information that is
@@ -65,7 +66,8 @@ public final class TStrings {
      * @return {@code true} if {@code haystack} is an infix search match for
      *         {@code needle}.
      */
-    public static boolean isInfixSearchMatch(String[] needle, String[] haystack) {
+    public static boolean isInfixSearchMatch(String[] needle,
+            String[] haystack) {
         int npos = 0;
         int hpos = 0;
         while (hpos < haystack.length && npos < needle.length) {
@@ -78,7 +80,7 @@ public final class TStrings {
             }
             String n = needle[npos];
             String h = haystack[hpos];
-            if(Strings.isSubString(n, h)) {
+            if(AnyStrings.isSubString(n, h)) {
                 ++npos;
                 ++hpos;
             }
@@ -158,18 +160,16 @@ public final class TStrings {
      * @return the tokens without stopwords
      */
     public static String[] stripStopWordsAndTokenize(String string) {
-        List<String> toks = Lists.newArrayList();
+        ArrayBuilder<String> toks = ArrayBuilder.builder();
         StringSplitter it = new StringSplitter(string, ' ');
-        int size = 0;
         while (it.hasNext()) {
             String next = it.next();
             if(!StringUtils.isBlank(next)
                     && !GlobalState.STOPWORDS.contains(next)) {
                 toks.add(next);
-                ++size;
             }
         }
-        return toks.toArray(new String[size]);
+        return toks.length() > 0 ? toks.build() : Array.containing();
     }
 
     /**

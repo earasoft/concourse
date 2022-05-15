@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -24,15 +24,15 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+import com.cinchapi.common.base.CheckedExceptions;
+import com.cinchapi.common.reflect.Reflection;
 import com.cinchapi.concourse.server.ConcourseServer;
 import com.cinchapi.concourse.server.http.HttpServer;
 import com.cinchapi.concourse.test.ConcourseIntegrationTest;
 import com.cinchapi.concourse.test.Variables;
 import com.cinchapi.concourse.time.Time;
 import com.cinchapi.concourse.util.Networking;
-import com.cinchapi.concourse.util.Reflection;
 import com.google.common.base.Strings;
-import com.google.common.base.Throwables;
 import com.google.common.collect.Lists;
 import com.google.gson.Gson;
 import com.google.gson.JsonElement;
@@ -79,7 +79,7 @@ public class HttpTest extends ConcourseIntegrationTest {
             return json;
         }
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 
@@ -114,7 +114,8 @@ public class HttpTest extends ConcourseIntegrationTest {
      * @param args
      * @return the filtered args
      */
-    private static Object[] filterArgs(Request.Builder builder, Object... args) {
+    private static Object[] filterArgs(Request.Builder builder,
+            Object... args) {
         List<Object> argsList = Lists.newArrayList(args);
         Iterator<Object> it = argsList.iterator();
         while (it.hasNext()) {
@@ -166,8 +167,8 @@ public class HttpTest extends ConcourseIntegrationTest {
     @Override
     public void beforeEachTest() {
         int port = Networking.getOpenPort();
-        httpServer = HttpServer.create(
-                Reflection.<ConcourseServer> get("server", this), port);
+        httpServer = HttpServer
+                .create(Reflection.<ConcourseServer> get("server", this), port);
         httpServer.start();
         // Wait for the HTTP server to start
         Request req = new Request.Builder().url(base).head().build();
@@ -217,7 +218,7 @@ public class HttpTest extends ConcourseIntegrationTest {
             return response;
         }
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 
@@ -242,7 +243,7 @@ public class HttpTest extends ConcourseIntegrationTest {
             return response;
         }
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 
@@ -262,8 +263,8 @@ public class HttpTest extends ConcourseIntegrationTest {
      * @return the response
      */
     protected Response login(String environment) {
-        environment = Strings.isNullOrEmpty(environment) ? "" : "/"
-                + environment;
+        environment = Strings.isNullOrEmpty(environment) ? ""
+                : "/" + environment;
         JsonObject creds = new JsonObject();
         creds.addProperty("username", "admin");
         creds.addProperty("password", "admin");
@@ -294,7 +295,7 @@ public class HttpTest extends ConcourseIntegrationTest {
             return response;
         }
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 
@@ -321,7 +322,7 @@ public class HttpTest extends ConcourseIntegrationTest {
             return response;
         }
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 

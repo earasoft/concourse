@@ -753,6 +753,33 @@ final class Concourse {
     }
 
     /**
+     * Invoke <em>method</em> using <em>args</em> within <em>pluginClass</em>.
+     *
+     * <p>
+     * The <em>pluginClass</em> must be available in Concourse Server via a
+     * plugin distribution. The <em>method</em> must also be accessible within
+     * the class.
+     * </p>
+     * <p>
+     * If the plugin throws any Exception, it'll be re-thrown here as a
+     * RuntimeException.
+     * </p>
+     * @param string $pluginClass the fully qualified name of the plugin class
+     *                            (e.g. com.cinchapi.plugin.PluginClass)
+     * @param string $method the name of the method within the
+     *                       <em>pluginClass</em> to invoke
+     * @param  array $args the arguments to pass to the <em>method</em>
+     * @return the result returned from the plugin
+     */
+    public function invokePlugin($pluginClass, $method, $args){
+        $targs = array();
+        foreach($args as $arg){
+            $targs[] = Convert::phpToThrift($arg);
+        }
+        return Convert::phpify($this->client->invokePlugin($pluginClass, $method, $targs, $this->creds, $this->transaction, $this->environment));
+    }
+
+    /**
      * Export data as a JSON string.
      *
      * @api
@@ -816,16 +843,16 @@ final class Concourse {
      * Add a link from a field in the <em>source</em> to one or more <em>destination</em> records.
      *
      * @api
-     ** <strong>link($key, $source, $destination)</strong> -Append a link from
+     ** <strong>link($key, $destination, $source)</strong> -Append a link from
      * <em>key</em> in <em>source</em> to <em>destination</em>.
-     ** <strong>link($key, $source, $destinations)</strong> - Append links
+     ** <strong>link($key, $destinations, $source)</strong> - Append links
      * from <em>key</em> in <em>source</em> to each of the
      * <em>destinations</em>
      *
      * @param string $key the field name
-     * @param integer $source the source record
      * @param integer $destination the destination record
      * @param array $destinations the destination records
+     * @param integer $source the source record
      * @return boolean|array return boolean or an associative array
      * associating the ids for each of the <em>destinations</em> to a boolean
      * that indicates whether the link was successfully added.
@@ -879,6 +906,25 @@ final class Concourse {
      * contains any data.
      */
     public function ping(){
+        return $this->dispatch(func_get_args());
+    }
+
+    /**
+     * Make the necessary changes to the data stored for <em>key</em> in
+     * <em>record</em> so that it contains the exact same <em>values</em> as the
+     * specified array.
+     *
+     * @api
+     * <strong>reconcile(key, record, values) - Atomically reconcile the values
+     * stored for <em>key</em> in <em>record</em> with those in the specified
+     * array.
+     *
+     * @param string $key the field name
+     * @param integer $record the record id
+     * @param array $values the array of values that should be exactly what is
+     *            contained in the field after this method executes
+     */
+    public function reconcile(){
         return $this->dispatch(func_get_args());
     }
 
@@ -1133,13 +1179,13 @@ final class Concourse {
      * <em>destination</em> records.
      *
      * @api
-     ** <strong>unlink($key, $source, $destination)</strong> - If it exists,
+     ** <strong>unlink($key, $destination, $source)</strong> - If it exists,
      * remove the link from {@code key} in <em>source</em> to <em>destination
      * </em> and return <em>true</em> if the link is removed.
      *
      * @param string $key the field name
-     * @param integer $source the source record
      * @param integer $destination the destination record (required if
+     * @param integer $source the source record
      *$destinations is unspecified)
      * @return boolean
      */

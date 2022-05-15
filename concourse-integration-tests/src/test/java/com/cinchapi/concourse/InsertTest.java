@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -22,9 +22,9 @@ import java.util.Set;
 import org.junit.Assert;
 import org.junit.Test;
 
+import com.cinchapi.common.base.AnyStrings;
 import com.cinchapi.concourse.test.ConcourseIntegrationTest;
 import com.cinchapi.concourse.thrift.Operator;
-import com.cinchapi.concourse.util.Strings;
 import com.cinchapi.concourse.util.TestData;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.Iterables;
@@ -49,7 +49,7 @@ public class InsertTest extends ConcourseIntegrationTest {
         object.addProperty(key, value);
         String json = object.toString();
         long record = client.insert(json).iterator().next();
-        Assert.assertEquals(value, client.get(key, record));
+        Assert.assertEquals(value, (int) client.get(key, record));
     }
 
     @Test
@@ -91,8 +91,8 @@ public class InsertTest extends ConcourseIntegrationTest {
         object.addProperty("spouse", Link.to(1));
         String json = object.toString();
         client.insert(json, 2);
-        Assert.assertTrue(client.find("spouse", Operator.LINKS_TO, 1).contains(
-                2L));
+        Assert.assertTrue(
+                client.find("spouse", Operator.LINKS_TO, 1).contains(2L));
     }
 
     @Test
@@ -103,8 +103,8 @@ public class InsertTest extends ConcourseIntegrationTest {
         object.addProperty("spouse", Link.toWhere("name = Jeff"));
         String json = object.toString();
         client.insert(json, 2);
-        Assert.assertTrue(client.find("spouse", Operator.LINKS_TO, 1).contains(
-                2L));
+        Assert.assertTrue(
+                client.find("spouse", Operator.LINKS_TO, 1).contains(2L));
     }
 
     @Test
@@ -115,11 +115,10 @@ public class InsertTest extends ConcourseIntegrationTest {
         object.addProperty("spouse", Link.toWhere("name = Jeff"));
         String json = object.toString();
         long record = client.insert(json).iterator().next();
-        Assert.assertTrue(client.find("spouse", Operator.LINKS_TO, 1).contains(
-                record));
+        Assert.assertTrue(
+                client.find("spouse", Operator.LINKS_TO, 1).contains(record));
     }
 
-    @SuppressWarnings("unchecked")
     @Test
     public void testInsertResolvableLinkWithLocalTargets() {
         Multimap<String, Object> a = HashMultimap.create();
@@ -129,9 +128,10 @@ public class InsertTest extends ConcourseIntegrationTest {
         b.put("_id", 1);
         client.insert(Lists.newArrayList(a, b));
         long record = Iterables.getOnlyElement(client.find("foo = 20"));
-        Assert.assertEquals(Sets.newHashSet(Iterables.getOnlyElement(client
-                .find("_id = 1"))), client.find(Strings.format("bar lnks2 {}",
-                record)));
+        Assert.assertEquals(
+                Sets.newHashSet(
+                        Iterables.getOnlyElement(client.find("_id = 1"))),
+                client.find(AnyStrings.format("bar lnks2 {}", record)));
     }
 
     @Test
@@ -146,9 +146,10 @@ public class InsertTest extends ConcourseIntegrationTest {
         Assert.assertEquals("Jeff Nelson", client.get("name", record));
         Assert.assertEquals("CEO", client.get("title", record));
         Assert.assertEquals("Cinchapi", client.get("company", record));
-        Assert.assertEquals(Sets.newLinkedHashSet(Lists.newArrayList(
-                Link.to(2), Link.to(1))), client.select("direct_reports",
-                record));
+        Assert.assertEquals(
+                Sets.newLinkedHashSet(
+                        Lists.newArrayList(Link.to(2), Link.to(1))),
+                client.select("direct_reports", record));
     }
 
     @Test
@@ -162,9 +163,10 @@ public class InsertTest extends ConcourseIntegrationTest {
         Assert.assertEquals("Jeff Nelson", client.get("name", record));
         Assert.assertEquals("CEO", client.get("title", record));
         Assert.assertEquals("Cinchapi", client.get("company", record));
-        Assert.assertEquals(Sets.newLinkedHashSet(Lists.newArrayList(
-                Link.to(2), Link.to(1))), client.select("direct_reports",
-                record));
+        Assert.assertEquals(
+                Sets.newLinkedHashSet(
+                        Lists.newArrayList(Link.to(2), Link.to(1))),
+                client.select("direct_reports", record));
     }
 
     @Test
@@ -182,7 +184,7 @@ public class InsertTest extends ConcourseIntegrationTest {
         b.put("title", "CEO");
         b.put("direct_reports", Link.to(2));
         b.put("direct_reports", Link.to(1));
-        c.put("pi", 22 / 7);
+        c.put("pi", (double) (22 / 7));
         List<Multimap<String, Object>> list = Lists.newArrayList();
         list.add(a);
         list.add(b);
@@ -194,7 +196,7 @@ public class InsertTest extends ConcourseIntegrationTest {
         Assert.assertEquals("baz", client.get("foo", record1));
         Assert.assertEquals("Cinchapi", client.get("company", record2));
         Assert.assertEquals(Link.to(2), client.get("direct_reports", record2));
-        Assert.assertEquals(22 / 7, client.get("pi", record3));
+        Assert.assertEquals(22 / 7, (double) client.get("pi", record3), 0);
     }
 
     @Test
@@ -237,9 +239,10 @@ public class InsertTest extends ConcourseIntegrationTest {
         Assert.assertEquals("Jeff Nelson", client.get("name", record));
         Assert.assertEquals("CEO", client.get("title", record));
         Assert.assertEquals("Cinchapi", client.get("company", record));
-        Assert.assertEquals(Sets.newLinkedHashSet(Lists.newArrayList(
-                Link.to(2), Link.to(1))), client.select("direct_reports",
-                record));
+        Assert.assertEquals(
+                Sets.newLinkedHashSet(
+                        Lists.newArrayList(Link.to(2), Link.to(1))),
+                client.select("direct_reports", record));
     }
 
     @Test
@@ -254,9 +257,10 @@ public class InsertTest extends ConcourseIntegrationTest {
         Assert.assertEquals("Jeff Nelson", client.get("name", record));
         Assert.assertEquals("CEO", client.get("title", record));
         Assert.assertEquals("Cinchapi", client.get("company", record));
-        Assert.assertEquals(Sets.newLinkedHashSet(Lists.newArrayList(
-                Link.to(2), Link.to(1))), client.select("direct_reports",
-                record));
+        Assert.assertEquals(
+                Sets.newLinkedHashSet(
+                        Lists.newArrayList(Link.to(2), Link.to(1))),
+                client.select("direct_reports", record));
     }
 
     @Test
@@ -278,6 +282,13 @@ public class InsertTest extends ConcourseIntegrationTest {
         String json = "[{\"id\":34,\"handle\":\".tp-caption.medium_bg_orange\",\"settings\":\"{\\\"hover\\\":\\\"false\\\"}\",\"hover\":\"\",\"params\":'{\"color\":\"rgb(255, 255, 255)\",\"font-size\":\"20px\",\"line-height\":\"20px\",\"font-weight\":\"800\",\"font-family\":\"\\\"Open Sans\\\"\",\"text-decoration\":\"none\",\"padding\":\"10px\",\"background-color\":\"rgb(243, 156, 18)\",\"border-width\":\"0px\",\"border-color\":\"rgb(255, 214, 88)\",\"border-style\":\"none\"}',\"__table\":\"wp_revslider_css\"}]";
         Set<Long> records = client.insert(json);
         Assert.assertFalse(records.isEmpty());
+    }
+
+    @Test
+    public void testInsertIntoSpecificRecord() {
+        String json = "{\"age\": 20, \"company\": \"Twitter\", \"email\": \"jaque.porto@aol.com\", \"friends\": [\"@1485912714681002\", \"@1485912714665009\", \"@1485912714659009\", \"@1485912714687017\"], \"gender\": \"male\", \"job_title\": \"Software Architect\", \"name\": \"Jaque Porto\", \"phone_number\": \"+1 (718) 386 7175\", \"profile_pic\": \"https://randomuser.me/api/portraits/men/38.jpg\", \"salary\": 84542, \"years_employed\": 7,  \"$id$\": 1485912714650000}";
+        Set<Long> records = client.insert(json);
+        Assert.assertEquals(Sets.newHashSet(1485912714650000L), records);
     }
 
 }

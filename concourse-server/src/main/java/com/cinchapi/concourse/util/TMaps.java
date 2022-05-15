@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -26,6 +26,9 @@ import java.util.SortedSet;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
+import com.cinchapi.concourse.server.plugin.data.Insertable;
+import com.cinchapi.concourse.server.plugin.data.LazyTrackingTObjectResultDataset;
+import com.google.common.base.Supplier;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
@@ -63,8 +66,9 @@ public final class TMaps {
      */
     public static <K, V> Set<K> extractKeysFromEntrySet(
             Collection<Entry<K, V>> entrySet) {
-        Set<K> keys = entrySet instanceof SortedSet ? new TreeSet<K>(
-                Comparators.<K> naturalOrArbitrary()) : Sets.<K> newHashSet();
+        Set<K> keys = entrySet instanceof SortedSet
+                ? new TreeSet<K>(Comparators.<K> naturalOrArbitrary())
+                : Sets.<K> newHashSet();
         for (Entry<K, V> entry : entrySet) {
             keys.add(entry.getKey());
         }
@@ -93,12 +97,13 @@ public final class TMaps {
      * @param entrySet
      * @return the populated map
      */
-    public static <K, V> Map<K, V> fromEntrySet(Collection<Entry<K, V>> entrySet) {
+    public static <K, V> Map<K, V> fromEntrySet(
+            Collection<Entry<K, V>> entrySet) {
         // TODO: Find a better way to do this. Perhaps use reflection to place
         // the entires directly in the map...
-        Map<K, V> map = entrySet instanceof SortedSet ? new TreeMap<K, V>(
-                Comparators.<K> naturalOrArbitrary()) : Maps
-                .<K, V> newHashMap();
+        Map<K, V> map = entrySet instanceof SortedSet
+                ? new TreeMap<K, V>(Comparators.<K> naturalOrArbitrary())
+                : Maps.<K, V> newHashMap();
         for (Entry<K, V> entry : entrySet) {
             map.put(entry.getKey(), entry.getValue());
         }
@@ -121,6 +126,75 @@ public final class TMaps {
      */
     public static <K, V> Map<K, V> newLinkedHashMapWithCapacity(int capacity) {
         return new LinkedHashMap<K, V>(capacity);
+    }
+
+    /**
+     * The same as
+     * {@link java.util.concurrent.ConcurrentMap#putIfAbsent(Object, Object))}
+     * but for non concurrent maps. This method is purely syntactic sugar.
+     * 
+     * @param map the map to modify
+     * @param key the key to lookup
+     * @param value the value to associate with {@code key} if no other
+     *            currently exists
+     * @return the value that is already associated with {@code key} if it
+     *         exists, otherwise {@code value}
+     */
+    public static <K, V> V putIfAbsent(Map<K, V> map, K key, V value) {
+        V stored = map.get(key);
+        if(stored == null) {
+            stored = value;
+            map.put(key, value);
+        }
+        return stored;
+    }
+
+    /**
+     * Put an association from {@code entity} to {@code data} within {@code map}
+     * using the most efficient code path depending on
+     * 
+     * @param map a result dataset map
+     * @param entity the key within the association
+     * @param data the value within the association
+     */
+    @SuppressWarnings("unchecked")
+    public static <E, A, V> void putResultDatasetOptimized(
+            Map<E, Map<A, Set<V>>> map, E entity, Map<A, Set<V>> data) {
+        if(map instanceof Insertable
+                && map.getClass() != LazyTrackingTObjectResultDataset.class) {
+            Insertable<E, A, V> dataset = (Insertable<E, A, V>) map;
+            for (Entry<A, Set<V>> entry : data.entrySet()) {
+                A attribute = entry.getKey();
+                for (V value : entry.getValue()) {
+                    dataset.insert(entity, attribute, value);
+                }
+            }
+        }
+        else {
+            map.put(entity, data);
+        }
+    }
+
+    /**
+     * Use the {@code supplier} to provide a value to associate with the
+     * {@code key} in the {@code map} if there isn't currently an associated
+     * value.
+     * 
+     * @param map the map to modify
+     * @param key the key to lookup and/or associate
+     * @param supplier the {@link Supplier} that lazily produces the value to
+     *            associate if no other value currently exists
+     * @return the value that is already associated with {@code key} if it
+     *         exists, otherwise the supplied value
+     */
+    public static <K, V> V supplyIfAbsent(Map<K, V> map, K key,
+            Supplier<V> supplier) {
+        V stored = map.get(key);
+        if(stored == null) {
+            stored = supplier.get();
+            map.put(key, stored);
+        }
+        return stored;
     }
 
     private TMaps() {/* noop */}

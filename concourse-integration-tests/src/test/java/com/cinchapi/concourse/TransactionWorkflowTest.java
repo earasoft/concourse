@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,16 +15,19 @@
  */
 package com.cinchapi.concourse;
 
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.Assert;
 import org.junit.Test;
-import com.cinchapi.concourse.Concourse;
-import com.cinchapi.concourse.Timestamp;
-import com.cinchapi.concourse.TransactionException;
+
 import com.cinchapi.concourse.lang.Criteria;
 import com.cinchapi.concourse.test.ConcourseIntegrationTest;
 import com.cinchapi.concourse.thrift.Operator;
+import com.cinchapi.concourse.time.Time;
+import com.cinchapi.concourse.util.Numbers;
+import com.cinchapi.concourse.util.Random;
 import com.cinchapi.concourse.util.TestData;
 import com.google.common.base.Strings;
 
@@ -51,7 +54,7 @@ public class TransactionWorkflowTest extends ConcourseIntegrationTest {
         while (Strings.isNullOrEmpty(password) || password.length() < 3) {
             password = TestData.getString();
         }
-        grantAccess(username, password);
+        createUser(username, password, "admin");
         client2 = Concourse.connect(SERVER_HOST, SERVER_PORT, username,
                 password);
     }
@@ -151,7 +154,7 @@ public class TransactionWorkflowTest extends ConcourseIntegrationTest {
             client.stage();
             client.get("foo", 1);
             client2.set("foo", "baz", 1);
-            client.audit("foo", 1);
+            client.review("foo", 1);
         }
         finally {
             client.abort();
@@ -164,7 +167,7 @@ public class TransactionWorkflowTest extends ConcourseIntegrationTest {
             client.stage();
             client.get("foo", 1);
             client2.set("foo", "baz", 1);
-            client.audit(1);
+            client.review(1);
         }
         finally {
             client.abort();
@@ -204,6 +207,20 @@ public class TransactionWorkflowTest extends ConcourseIntegrationTest {
             client.get("foo", 1);
             client2.set("foo", "baz", 1);
             client.chronologize("foo", 1);
+        }
+        finally {
+            client.abort();
+        }
+    }
+
+    @Test(expected = TransactionException.class)
+    public void testChronologizeWithFutureEndTimestampGrabsLock() {
+        try {
+            client.stage();
+            client.chronologize("foo", 1, Timestamp.epoch(),
+                    Timestamp.fromMicros(Time.now() + 100000000));
+            client2.set("foo", "baz", 1);
+            Assert.assertFalse(client.commit());
         }
         finally {
             client.abort();
@@ -491,6 +508,48 @@ public class TransactionWorkflowTest extends ConcourseIntegrationTest {
         t1.join();
         Assert.assertFalse(committed.get());
         Assert.assertFalse(client.select("name", 1).contains("Ron"));
+    }
+
+    @Test
+    public void testToggledWriteConsolidation() {
+        int number = Random.getScaleCount();
+        int even;
+        int odd;
+        if(Numbers.isEven(number)) {
+            even = number;
+            odd = number + 1;
+        }
+        else {
+            even = number + 1;
+            odd = number;
+        }
+        client.stage();
+        boolean add = true;
+        for (int i = 0; i < even; ++i) {
+            if(add) {
+                client.add("name", "jeff", 1);
+            }
+            else {
+                client.remove("name", "jeff", 1);
+            }
+            add = !add;
+        }
+        add = true;
+        for (int i = 0; i < odd; ++i) {
+            if(add) {
+                client.add("age", 34, 1);
+            }
+            else {
+                client.remove("age", 34, 1);
+            }
+            add = !add;
+        }
+        Assert.assertTrue(client.commit());
+        Map<Timestamp, List<String>> nameReview = client.review("name", 1);
+        Map<Timestamp, List<String>> ageReview = client.review("age", 1);
+        Assert.assertEquals(0, nameReview.size());
+        Assert.assertEquals(1, ageReview.size());
+        Assert.assertEquals(1, ageReview.values().iterator().next().size());
     }
 
 }

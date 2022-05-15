@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -17,8 +17,8 @@ package com.cinchapi.concourse.server.storage.db;
 
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -32,9 +32,6 @@ import javax.annotation.concurrent.ThreadSafe;
 
 import com.cinchapi.concourse.annotate.PackagePrivate;
 import com.cinchapi.concourse.server.io.Byteable;
-import com.cinchapi.concourse.server.model.PrimaryKey;
-import com.cinchapi.concourse.server.model.Text;
-import com.cinchapi.concourse.server.model.Value;
 import com.cinchapi.concourse.server.storage.Action;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
@@ -54,85 +51,33 @@ import com.google.common.collect.Sets;
 @PackagePrivate
 @ThreadSafe
 @SuppressWarnings("unchecked")
-abstract class Record<L extends Byteable & Comparable<L>, K extends Byteable & Comparable<K>, V extends Byteable & Comparable<V>> {
+public abstract class Record<L extends Byteable & Comparable<L>, K extends Byteable & Comparable<K>, V extends Byteable & Comparable<V>> {
 
     /**
-     * Return a PrimaryRecord for {@code primaryKey}.
-     * 
-     * @param primaryKey
-     * @return the PrimaryRecord
+     * This index is used to efficiently handle historical reads. Given a
+     * revision (e.g key/value pair), and historical timestamp, we can count the
+     * number of times that the value appears <em>beforehand</em> at determine
+     * if the mapping existed or not.
      */
-    public static PrimaryRecord createPrimaryRecord(PrimaryKey record) {
-        return new PrimaryRecord(record, null);
-    }
+    protected final transient Map<K, List<CompactRevision<V>>> history = $createHistoryMap();
 
     /**
-     * Return a partial PrimaryRecord for {@code key} in {@record}.
-     * 
-     * @param primaryKey
-     * @param key
-     * @return the PrimaryRecord.
+     * The locator used to identify this Record.
      */
-    public static PrimaryRecord createPrimaryRecordPartial(PrimaryKey record,
-            Text key) {
-        return new PrimaryRecord(record, key);
-    }
+    protected final L locator;
 
     /**
-     * Return a SearchRecord for {@code key}.
-     * 
-     * @param key
-     * @return the SearchRecord
+     * The index is used to efficiently determine the set of values currently
+     * mapped from a key. The subclass should specify the appropriate type of
+     * key sorting via the returned type for {@link #$createDataMap()}.
      */
-    public static SearchRecord createSearchRecord(Text key) {
-        return new SearchRecord(key, null);
-    }
-
-    /**
-     * Return a partial SearchRecord for {@code term} in {@code key}.
-     * 
-     * @param key
-     * @param term
-     * @return the partial SearchRecord
-     */
-    public static SearchRecord createSearchRecordPartial(Text key, Text term) {
-        return new SearchRecord(key, term);
-    }
-
-    /**
-     * Return a SeconaryRecord for {@code key}.
-     * 
-     * @param key
-     * @return the SecondaryRecord
-     */
-    public static SecondaryRecord createSecondaryRecord(Text key) {
-        return new SecondaryRecord(key, null);
-    }
-
-    /**
-     * Return a partial SecondaryRecord for {@code value} in {@code key}.
-     * 
-     * @param key
-     * @param value
-     * @return the SecondaryRecord
-     */
-    public static SecondaryRecord createSecondaryRecordPartial(Text key,
-            Value value) {
-        return new SecondaryRecord(key, value);
-    }
+    protected final transient Map<K, Set<V>> present = $createDataMap();
 
     /**
      * The master lock for {@link #write} and {@link #read}. DO NOT use this
      * lock directly.
      */
     private final ReentrantReadWriteLock master = new ReentrantReadWriteLock();
-
-    /**
-     * An exclusive lock that permits only one writer and no reader. Use this
-     * lock to ensure that no read occurs while data is being appended to the
-     * Record.
-     */
-    private final WriteLock write = master.writeLock();
 
     /**
      * A shared lock that permits many readers and no writer. Use this lock to
@@ -142,30 +87,13 @@ abstract class Record<L extends Byteable & Comparable<L>, K extends Byteable & C
     protected final ReadLock read = master.readLock();
 
     /**
-     * The index is used to efficiently determine the set of values currently
-     * mapped from a key. The subclass should specify the appropriate type of
-     * key sorting via the returned type for {@link #mapType()}.
+     * This set is returned when a key does not map to any values so that the
+     * caller can transparently interact without performing checks or
+     * compromising data consisentcy. This is a member variable (as opposed to
+     * static constant) that is mocked in the constructor because it has a
+     * generic type argument.
      */
-    protected final transient Map<K, Set<V>> present = mapType();
-
-    /**
-     * This index is used to efficiently handle historical reads. Given a
-     * revision (e.g key/value pair), and historical timestamp, we can count the
-     * number of times that the value appears <em>beforehand</em> at determine
-     * if the mapping existed or not.
-     */
-    protected final transient HashMap<K, List<CompactRevision<V>>> history = Maps
-            .newHashMap();
-
-    /**
-     * The version of the Record's most recently appended {@link Revision}.
-     */
-    private transient long version = 0;
-
-    /**
-     * The locator used to identify this Record.
-     */
-    protected final L locator;
+    private final Set<V> emptyValues = new EmptyValueSet();
 
     /**
      * The key used to identify this Record. This value is {@code null} unless
@@ -181,13 +109,11 @@ abstract class Record<L extends Byteable & Comparable<L>, K extends Byteable & C
     private final boolean partial;
 
     /**
-     * This set is returned when a key does not map to any values so that the
-     * caller can transparently interact without performing checks or
-     * compromising data consisentcy. This is a member variable (as opposed to
-     * static constant) that is mocked in the constructor because it has a
-     * generic type argument.
+     * An exclusive lock that permits only one writer and no reader. Use this
+     * lock to ensure that no read occurs while data is being appended to the
+     * Record.
      */
-    private final Set<V> emptyValues = new EmptyValueSet();
+    private final WriteLock write = master.writeLock();
 
     /**
      * Construct a new instance.
@@ -198,7 +124,7 @@ abstract class Record<L extends Byteable & Comparable<L>, K extends Byteable & C
     protected Record(L locator, @Nullable K key) {
         this.locator = locator;
         this.key = key;
-        this.partial = key == null ? false : true;
+        this.partial = key != null;
     }
 
     /**
@@ -215,43 +141,15 @@ abstract class Record<L extends Byteable & Comparable<L>, K extends Byteable & C
     public void append(Revision<L, K, V> revision) {
         write.lock();
         try {
-            // NOTE: We only need to enforce the monotonic increasing constraint
-            // for PrimaryRecords because Secondary and Search records will be
-            // populated from Blocks that were sorted based primarily on
-            // non-version factors.
-            Preconditions
-                    .checkArgument((this instanceof PrimaryRecord && revision
-                            .getVersion() >= version) || true, "Cannot "
-                            + "append %s because its version(%s) is lower "
-                            + "than the Record's current version(%s). The",
-                            revision, revision.getVersion(), version);
-            Preconditions.checkArgument(revision.getLocator().equals(locator),
-                    "Cannot append %s because it does not belong to %s",
-                    revision, this);
-            // NOTE: The check below is ignored for a partial SearchRecord
-            // instance because they 'key' is the entire search query, but we
-            // append Revisions for each term in the query
-            Preconditions.checkArgument(
-                    (partial && revision.getKey().equals(key)) || !partial
-                            || this instanceof SearchRecord,
-                    "Cannot append %s because it does not belong to %s",
-                    revision, this);
-            // NOTE: The check below is ignored for a SearchRecord instance
-            // because it will legitimately appear that "duplicate" data has
-            // been added if similar data is added to the same key in a record
-            // at different times (i.e. adding John Doe and Johnny Doe to the
-            // "name")
-            Preconditions.checkArgument(this instanceof SearchRecord
-                    || isOffset(revision), "Cannot append "
-                    + "%s because it represents an action "
-                    + "involving a key, value and locator that has not "
-                    + "been offset.", revision);
+            checkIsRelevantRevision(revision);
+            checkIsOffsetRevision(revision);
 
+            K key = revision.getKey();
             // Update present index
-            Set<V> values = present.get(revision.getKey());
+            Set<V> values = present.get(key);
             if(values == null) {
-                values = Sets.<V> newLinkedHashSet();
-                present.put(revision.getKey(), values);
+                values = setType();
+                present.put(key, values);
             }
             if(revision.getType() == Action.ADD) {
                 values.add(revision.getValue());
@@ -259,27 +157,72 @@ abstract class Record<L extends Byteable & Comparable<L>, K extends Byteable & C
             else {
                 values.remove(revision.getValue());
                 if(values.isEmpty()) {
-                    present.remove(revision.getKey());
+                    present.remove(key);
                 }
             }
 
             // Update history index
-            List<CompactRevision<V>> revisions = history.get(revision.getKey());
+            List<CompactRevision<V>> revisions = history.get(key);
             if(revisions == null) {
                 revisions = Lists.newArrayList();
-                history.put(revision.getKey(), revisions);
+                history.put(key, revisions);
             }
             revisions.add(revision.compact());
 
-            // Update metadata
-            version = Math.max(version, revision.getVersion());
+            // Run post-append hook
+            onAppend(revision);
 
             // Make revision eligible for GC
             revision = null;
-
         }
         finally {
             write.unlock();
+        }
+    }
+
+    /**
+     * Return the number of unique keys in this {@link Record}'s history.
+     * 
+     * @return the {@link Record} cardinality
+     */
+    public int cardinality() {
+        return history.size();
+    }
+
+    /**
+     * Return {@code true} if {@code value} <em>currently</em> exists in the
+     * field mapped from {@code key}.
+     * 
+     * @param key
+     * @param value
+     * @return {@code true} if {@code key} as {@code value} is a valid mapping
+     */
+    public boolean contains(K key, V value) {
+        read.lock();
+        try {
+            return $get(key).contains(value);
+        }
+        finally {
+            read.unlock();
+        }
+    }
+
+    /**
+     * Return {@code true} if {@code value} existed in the field mapped from
+     * {@code key} at {@code timestamp}
+     * 
+     * @param key
+     * @param value
+     * @param timestamp
+     * @return {@code true} if {@code key} as {@code value} is a valid mapping
+     */
+    public boolean contains(K key, V value, long timestamp) {
+        read.lock();
+        try {
+            return get(key, timestamp).contains(value);
+        }
+        finally {
+            read.unlock();
         }
     }
 
@@ -294,13 +237,78 @@ abstract class Record<L extends Byteable & Comparable<L>, K extends Byteable & C
     }
 
     /**
-     * Return the Record's version, which is equal to the largest version of an
-     * appended Revision.
+     * Return a live view of the current set of values mapped from
+     * {@code key}.
      * 
-     * @return the version
+     * @param key
+     * @return the set of mapped values for {@code key}
      */
-    public long getVersion() {
-        return version;
+    public Set<V> get(K key) {
+        read.lock();
+        try {
+            Set<V> values = $get(key);
+            return values == emptyValues ? emptyValues
+                    : Collections.unmodifiableSet(values);
+        }
+        finally {
+            read.unlock();
+        }
+    }
+
+    /**
+     * Return the historical set of values for {@code key} at {@code timestamp}.
+     * 
+     * @param key
+     * @param timestamp
+     * @return the set of mapped values for {@code key} at {@code timestamp}.
+     */
+    public Set<V> get(K key, long timestamp) {
+        read.lock();
+        try {
+            List<CompactRevision<V>> stored = history.get(key);
+            return extractHistoricalValues(stored, timestamp);
+        }
+        finally {
+            read.unlock();
+        }
+    }
+
+    /**
+     * Return a live view of all the data that is presently contained in this
+     * record.
+     * 
+     * @return the data
+     */
+    public Map<K, Set<V>> getAll() {
+        read.lock();
+        try {
+            return Collections.unmodifiableMap(present);
+        }
+        finally {
+            read.unlock();
+        }
+
+    }
+
+    /**
+     * Return a view of all the data that was contained in this record at
+     * {@code timestamp}.
+     * 
+     * @param timestamp
+     * @return the data
+     */
+    public Map<K, Set<V>> getAll(long timestamp) {
+        read.lock();
+        try {
+            Map<K, Set<V>> data = Maps.newLinkedHashMap();
+            for (K key : keys(timestamp)) {
+                data.put(key, get(key, timestamp));
+            }
+            return data;
+        }
+        finally {
+            read.unlock();
+        }
     }
 
     @Override
@@ -333,22 +341,16 @@ abstract class Record<L extends Byteable & Comparable<L>, K extends Byteable & C
         return partial;
     }
 
-    @Override
-    public String toString() {
-        return getClass().getSimpleName() + " " + (partial ? key + " IN " : "")
-                + locator;
-    }
-
     /**
-     * Return the Set of {@code keys} that map to fields which
-     * <em>currently</em> contain values.
+     * Return a live view of the keys that map to fields which
+     * <em>presently</em> contain values.
      * 
      * @return the Set of non-empty field keys
      */
-    protected Set<K> describe() {
+    public Set<K> keys() {
         read.lock();
         try {
-            return Collections.unmodifiableSet(present.keySet()); /* Authorized */
+            return Collections.unmodifiableSet(present.keySet());
         }
         finally {
             read.unlock();
@@ -362,7 +364,7 @@ abstract class Record<L extends Byteable & Comparable<L>, K extends Byteable & C
      * @param timestamp
      * @return the Set of non-empty field keys
      */
-    protected Set<K> describe(long timestamp) {
+    public Set<K> keys(long timestamp) {
         read.lock();
         try {
             Set<K> description = Sets.newLinkedHashSet();
@@ -380,60 +382,10 @@ abstract class Record<L extends Byteable & Comparable<L>, K extends Byteable & C
         }
     }
 
-    /**
-     * Lazily retrieve an unmodifiable view of the current set of values mapped
-     * from {@code key}.
-     * 
-     * @param key
-     * @return the set of mapped values for {@code key}
-     */
-    protected Set<V> get(K key) {
-        read.lock();
-        try {
-            Set<V> values = present.get(key);
-            return values != null ? values : emptyValues;
-        }
-        finally {
-            read.unlock();
-        }
-    }
-
-    /**
-     * Lazily retrieve the historical set of values for {@code key} at
-     * {@code timestamp}.
-     * 
-     * @param key
-     * @param timestamp
-     * @return the set of mapped values for {@code key} at {@code timestamp}.
-     */
-    protected Set<V> get(K key, long timestamp) {
-        read.lock();
-        try {
-            Set<V> values = emptyValues;
-            List<CompactRevision<V>> stored = history.get(key);
-            if(stored != null) {
-                values = Sets.newLinkedHashSet();
-                Iterator<CompactRevision<V>> it = stored.iterator();
-                while (it.hasNext()) {
-                    CompactRevision<V> revision = it.next();
-                    if(revision.getVersion() <= timestamp) {
-                        if(revision.getType() == Action.ADD) {
-                            values.add(revision.getValue());
-                        }
-                        else {
-                            values.remove(revision.getValue());
-                        }
-                    }
-                    else {
-                        break;
-                    }
-                }
-            }
-            return values;
-        }
-        finally {
-            read.unlock();
-        }
+    @Override
+    public String toString() {
+        return getClass().getSimpleName() + " " + (partial ? key + " IN " : "")
+                + locator;
     }
 
     /**
@@ -441,7 +393,122 @@ abstract class Record<L extends Byteable & Comparable<L>, K extends Byteable & C
      * 
      * @return the initialized mappings
      */
-    protected abstract Map<K, Set<V>> mapType();
+    protected abstract Map<K, Set<V>> $createDataMap();
+
+    /**
+     * Initialize the appropriate data structure for the {@link #history}.
+     * 
+     * @return the initialized mappings
+     */
+    protected Map<K, List<CompactRevision<V>>> $createHistoryMap() {
+        return Maps.newHashMap();
+    }
+
+    /**
+     * Check that {@code revision} is {@link #isOffset(Revision) offset} within
+     * this {@link Record} and throw and {@link IllegalArgumentException} if
+     * that is not the case.
+     * <p>
+     * NOTE: Specific {@link Record} subtypes may override this method to ignore
+     * the check if it is not valid for their operations.
+     * </p>
+     * 
+     * @param revision
+     * @throws IllegalArgumentException
+     */
+    protected void checkIsOffsetRevision(Revision<L, K, V> revision)
+            throws IllegalArgumentException {
+        Preconditions.checkArgument(isOffset(revision),
+                "Cannot append %s because it represents an action "
+                        + "involving a key, value and locator that has not "
+                        + "been offset.",
+                revision);
+    }
+
+    /**
+     * Check that {@code revision} is relevant to this {@link Record} and throw
+     * and {@link IllegalArgumentException} if that is not the case.
+     * <p>
+     * NOTE: Specific {@link Record} subtypes may override this method to ignore
+     * the check if it is not valid for their operations.
+     * </p>
+     * 
+     * @param revision
+     * @throws IllegalArgumentException
+     */
+    protected void checkIsRelevantRevision(Revision<L, K, V> revision)
+            throws IllegalArgumentException {
+        Preconditions.checkArgument(revision.getLocator().equals(locator),
+                "Cannot append %s because it does not belong to %s", revision,
+                this);
+        Preconditions.checkArgument(
+                (partial && revision.getKey().equals(key)) || !partial,
+                "Cannot append %s because it does not belong to %s", revision,
+                this);
+    }
+
+    /**
+     * Extract the {@code values} from the list of {@link CompactRevision
+     * revisions} that occurred in or before {@code timestamp}.
+     * 
+     * @param revisions
+     * @param timestamp
+     * @return the set of values at {@code timestamp}.
+     */
+    protected Set<V> extractHistoricalValues(List<CompactRevision<V>> revisions,
+            long timestamp) {
+        Set<V> values = emptyValues;
+        if(revisions != null) {
+            values = Sets.newLinkedHashSet();
+            Iterator<CompactRevision<V>> it = revisions.iterator();
+            while (it.hasNext()) {
+                CompactRevision<V> revision = it.next();
+                if(revision.getVersion() <= timestamp) {
+                    if(revision.getType() == Action.ADD) {
+                        values.add(revision.getValue());
+                    }
+                    else {
+                        values.remove(revision.getValue());
+                    }
+                }
+                else {
+                    break;
+                }
+            }
+        }
+        return values;
+    }
+
+    /**
+     * Logic that the subclass can run after the {@code revision} is
+     * {@link #append(Revision) appended}.
+     */
+    protected void onAppend(Revision<L, K, V> revision) {/* no-op */}
+
+    /**
+     * Initialized the appropriate data structure for the {@link Set} that is
+     * mapped from each {@code K key} in the {@link #present} collection to
+     * contain all associated values.
+     * 
+     * @return an initialized value set
+     */
+    protected Set<V> setType() {
+        return new LinkedHashSet<>();
+    }
+
+    /**
+     * Implementation of {@link #get(Byteable)} for internal use.
+     * <p>
+     * Does not grab the {@link #read read lock} or create an unmodifiable view
+     * of the returned values.
+     * </p>
+     * 
+     * @param key
+     * @return the set of mapped values for {@code key}
+     */
+    private Set<V> $get(K key) {
+        return present.getOrDefault(key, emptyValues);
+    }
 
     /**
      * Return {@code true} if the action associated with {@code revision}
@@ -451,10 +518,10 @@ abstract class Record<L extends Byteable & Comparable<L>, K extends Byteable & C
      * @return {@code true} if the revision if offset.
      */
     private boolean isOffset(Revision<L, K, V> revision) {
-        boolean contained = get(revision.getKey())
+        boolean contained = $get(revision.getKey())
                 .contains(revision.getValue());
-        return ((revision.getType() == Action.ADD && !contained) || (revision
-                .getType() == Action.REMOVE && contained)) ? true : false;
+        return ((revision.getType() == Action.ADD && !contained)
+                || (revision.getType() == Action.REMOVE && contained));
     }
 
     /**

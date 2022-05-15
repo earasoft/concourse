@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -23,8 +23,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.util.Map;
 
-import com.google.common.base.Throwables;
+import com.cinchapi.common.base.CheckedExceptions;
+import com.google.common.collect.Maps;
 
 /**
  * Utilities to handle getting resources in a standard and portable way.
@@ -32,6 +34,11 @@ import com.google.common.base.Throwables;
  * @author Jeff Nelson
  */
 public class Resources {
+
+    /**
+     * Collection which maps a resource name with its URL.
+     */
+    private static Map<String, URL> map = Maps.newHashMap();
 
     /**
      * Finds a resource with a given name. The rules for searching resources
@@ -71,16 +78,23 @@ public class Resources {
     public static URL get(final String name) {
         File temp;
         try {
-            temp = File.createTempFile("java-resource", ".tmp");
-            Path path = Paths.get(temp.getAbsolutePath());
-            Files.copy(Resources.class.getResourceAsStream(name), path,
-                    StandardCopyOption.REPLACE_EXISTING);
-            return temp.toURI().toURL();
+            URL url = map.get(name);
+            if(url == null) {
+                temp = File.createTempFile("java-resource", ".tmp");
+                Path path = Paths.get(temp.getAbsolutePath());
+                Files.copy(Resources.class.getResourceAsStream(name), path,
+                        StandardCopyOption.REPLACE_EXISTING);
+                url = temp.toURI().toURL();
+                map.put(name, url);
+                return url;
+            }
+            else {
+                return url;
+            }
         }
         catch (IOException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
-
     }
 
     /**
@@ -95,7 +109,7 @@ public class Resources {
             return new File(Resources.get(name).toURI()).getAbsolutePath();
         }
         catch (URISyntaxException e) {
-            throw Throwables.propagate(e);
+            throw CheckedExceptions.wrapAsRuntimeException(e);
         }
     }
 

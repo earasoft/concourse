@@ -1,13 +1,12 @@
 /*
- * Copyright 2011- Per Wendel
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,6 +17,7 @@ package spark.webserver;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Set;
 
 import javax.servlet.Filter;
 import javax.servlet.FilterChain;
@@ -28,8 +28,7 @@ import javax.servlet.ServletResponse;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import com.cinchapi.concourse.util.Logger;
-import com.cinchapi.concourse.util.Reflection;
+import org.apache.commons.lang.StringUtils;
 
 import spark.Access;
 import spark.HaltException;
@@ -40,10 +39,9 @@ import spark.Route;
 import spark.route.HttpMethod;
 import spark.route.RouteMatch;
 import spark.route.RouteMatcher;
-import spark.webserver.MatcherFilter;
-import spark.webserver.NotConsumedException;
-import spark.webserver.RequestWrapper;
-import spark.webserver.ResponseWrapper;
+
+import com.cinchapi.common.reflect.Reflection;
+import com.cinchapi.concourse.util.Logger;
 
 /**
  * Filter for matching of filters and routes.
@@ -134,8 +132,8 @@ public class MatcherFilter implements Filter {
                 for (RouteMatch filterMatch : matchSet) {
                     Object filterTarget = filterMatch.getTarget();
                     if(filterTarget instanceof spark.Filter) {
-                        Request request = RequestResponseFactory.create(
-                                filterMatch, httpRequest);
+                        Request request = RequestResponseFactory
+                                .create(filterMatch, httpRequest);
                         Response response = RequestResponseFactory
                                 .create(httpResponse);
 
@@ -168,7 +166,20 @@ public class MatcherFilter implements Filter {
                     // See if get is mapped to provide default head mapping
                     bodyContent = routeMatcher.findTargetForRequestedRoute(
                             HttpMethod.get, uri, acceptType) != null ? ""
-                            : null;
+                                    : null;
+                }
+                else if(httpMethod == HttpMethod.options
+                        && bodyContent == null) {
+                    // CON-476: For an OPTIONS request, attempt to get all the
+                    // targets for the route and specify those in the response
+                    Set<HttpMethod> methods = routeMatcher
+                            .findMethodsForRequestedPath(uri, acceptType);
+                    if(!methods.isEmpty()) {
+                        httpResponse.setHeader("Allow",
+                                StringUtils.join(methods, ','));
+                        bodyContent = "";
+                    }
+
                 }
 
                 if(target != null) {
@@ -176,8 +187,8 @@ public class MatcherFilter implements Filter {
                         String result = null;
                         if(target instanceof Route) {
                             Route route = ((Route) target);
-                            Request request = RequestResponseFactory.create(
-                                    match, httpRequest);
+                            Request request = RequestResponseFactory
+                                    .create(match, httpRequest);
                             Response response = RequestResponseFactory
                                     .create(httpResponse);
 
@@ -196,8 +207,8 @@ public class MatcherFilter implements Filter {
                     }
                     catch (Exception e) {
                         Logger.error("", e);
-                        httpResponse
-                                .setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+                        httpResponse.setStatus(
+                                HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
                         bodyContent = INTERNAL_ERROR;
                     }
                 }
@@ -209,8 +220,8 @@ public class MatcherFilter implements Filter {
                 for (RouteMatch filterMatch : matchSet) {
                     Object filterTarget = filterMatch.getTarget();
                     if(filterTarget instanceof spark.Filter) {
-                        Request request = RequestResponseFactory.create(
-                                filterMatch, httpRequest);
+                        Request request = RequestResponseFactory
+                                .create(filterMatch, httpRequest);
                         Response response = RequestResponseFactory
                                 .create(httpResponse);
 
@@ -257,8 +268,8 @@ public class MatcherFilter implements Filter {
                 if(httpResponse.getContentType() == null) {
                     httpResponse.setContentType("text/html; charset=utf-8");
                 }
-                httpResponse.getOutputStream().write(
-                        bodyContent.getBytes("utf-8"));
+                httpResponse.getOutputStream()
+                        .write(bodyContent.getBytes("utf-8"));
             }
         }
         else if(chain != null) {
@@ -266,6 +277,7 @@ public class MatcherFilter implements Filter {
         }
 
     }
+
     public void init(FilterConfig filterConfig) {
         //
     }

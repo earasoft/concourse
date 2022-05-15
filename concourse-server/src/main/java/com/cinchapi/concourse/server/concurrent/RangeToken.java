@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -20,10 +20,10 @@ import java.util.Arrays;
 
 import javax.annotation.Nullable;
 
+import com.cinchapi.common.io.ByteBuffers;
 import com.cinchapi.concourse.server.model.Text;
 import com.cinchapi.concourse.server.model.Value;
 import com.cinchapi.concourse.thrift.Operator;
-import com.cinchapi.concourse.util.ByteBuffers;
 
 /**
  * A specialized {@link Token} that is used to define the scope of a lock
@@ -166,8 +166,8 @@ public class RangeToken extends Token {
         this.values = new Value[this.operator == Operator.BETWEEN ? 2 : 1];
         int i = 0;
         while (bytes.hasRemaining()) {
-            values[i] = Value.fromByteBuffer(ByteBuffers.get(bytes,
-                    bytes.getInt()));
+            values[i] = Value
+                    .fromByteBuffer(ByteBuffers.get(bytes, bytes.getInt()));
         }
     }
 
@@ -306,7 +306,7 @@ public class RangeToken extends Token {
             case BETWEEN:
                 return other.values[1].compareTo(myValue) > 0; // end of range
                                                                // not
-                // included for BETWEEN
+            // included for BETWEEN
             case REGEX:
             case NOT_REGEX:
                 return true;

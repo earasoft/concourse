@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -16,23 +16,23 @@
 package com.cinchapi.concourse.cli;
 
 import java.io.IOException;
+import java.nio.file.Paths;
 
 import javax.annotation.Nullable;
 
+import jline.console.ConsoleReader;
+
 import org.apache.commons.lang.StringUtils;
-
-import com.cinchapi.concourse.config.ConcourseClientPreferences;
-import com.cinchapi.concourse.util.FileOps;
-
 import org.slf4j.LoggerFactory;
 
-import jline.console.ConsoleReader;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 
 import com.beust.jcommander.JCommander;
 import com.beust.jcommander.ParameterException;
 import com.cinchapi.concourse.Concourse;
+import com.cinchapi.concourse.config.ConcourseClientPreferences;
+import com.cinchapi.concourse.util.FileOps;
 import com.google.common.base.CaseFormat;
 import com.google.common.base.Strings;
 
@@ -75,35 +75,13 @@ public abstract class CommandLineInterface {
 
     /**
      * Construct a new instance.
-     * <p>
-     * The subclass should call {@link #CommandLineInterface(Options, String[])}
-     * from this constructor with an instance of of the appropriate subclass of
-     * {@link Options} if necessary.
-     * </p>
      * 
-     * @param args
-     */
-    public CommandLineInterface(String[] args) {
-        this(new Options(), args);
-    }
-
-    /**
-     * Construct a new instance that is seeded with an object containing options
-     * metadata. The {@code options} will be parsed by {@link JCommander} to
-     * configure them appropriately.
-     * <p>
-     * The subclass should NOT override this constructor. If the subclass
-     * defines a custom {@link Options} class, then it only needs to pass those
-     * to this super constructor from {@link #CommandLineInterface(String...)}.
-     * </p>
-     * 
-     * @param options
      * @param args - these usually come from the main method
      */
-    protected CommandLineInterface(Options options, String... args) {
+    protected CommandLineInterface(String... args) {
         try {
+            this.options = getOptions();
             this.parser = new JCommander(options, args);
-            this.options = options;
             parser.setProgramName(CaseFormat.UPPER_CAMEL.to(
                     CaseFormat.LOWER_HYPHEN, this.getClass().getSimpleName()));
             this.console = new ConsoleReader();
@@ -116,7 +94,7 @@ public abstract class CommandLineInterface {
                 options.prefs = FileOps.expandPath(options.prefs,
                         getLaunchDirectory());
                 ConcourseClientPreferences prefs = ConcourseClientPreferences
-                        .open(options.prefs);
+                        .from(Paths.get(options.prefs));
                 options.username = prefs.getUsername();
                 options.password = new String(prefs.getPasswordExplicit());
                 options.host = prefs.getHost();
@@ -124,8 +102,8 @@ public abstract class CommandLineInterface {
                 options.environment = prefs.getEnvironment();
             }
             if(Strings.isNullOrEmpty(options.password)) {
-                options.password = console.readLine("password for ["
-                        + options.username + "]: ", '*');
+                options.password = console.readLine(
+                        "password for [" + options.username + "]: ", '*');
             }
             int attemptsRemaining = 5;
             while (concourse == null && attemptsRemaining > 0) {
@@ -138,14 +116,14 @@ public abstract class CommandLineInterface {
                     System.err.println("Error processing login. Please check "
                             + "username/password combination and try again.");
                     concourse = null;
-                    options.password = console.readLine("password for ["
-                            + options.username + "]: ", '*');
+                    options.password = console.readLine(
+                            "password for [" + options.username + "]: ", '*');
                     attemptsRemaining--;
                 }
             }
             if(concourse == null) {
-                System.err
-                        .println("Unable to connect to Concourse. Is the server running?");
+                System.err.println(
+                        "Unable to connect to Concourse. Is the server running?");
                 System.exit(1);
             }
         }
@@ -207,4 +185,12 @@ public abstract class CommandLineInterface {
                                                     // script that is sourced by
                                                     // every server-side CLI
     }
+
+    /**
+     * Return an {@link Options} object that contains instructions for parsing
+     * the command line arguments to the cli.
+     * 
+     * @return the {@link Options}.
+     */
+    protected abstract Options getOptions();
 }

@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
+ * Copyright (c) 2013-2022 Cinchapi Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,16 +20,19 @@ import java.util.Objects;
 
 import javax.annotation.concurrent.Immutable;
 
+import com.cinchapi.common.io.ByteBuffers;
 import com.cinchapi.concourse.annotate.DoNotInvoke;
+import com.cinchapi.concourse.server.io.ByteSink;
 import com.cinchapi.concourse.server.io.Byteable;
 import com.cinchapi.concourse.server.io.Byteables;
+import com.cinchapi.concourse.server.model.Identifier;
 import com.cinchapi.concourse.server.model.Position;
-import com.cinchapi.concourse.server.model.PrimaryKey;
 import com.cinchapi.concourse.server.model.Text;
 import com.cinchapi.concourse.server.model.Value;
 import com.cinchapi.concourse.server.storage.Action;
+import com.cinchapi.concourse.server.storage.CommitVersions;
 import com.cinchapi.concourse.server.storage.Versioned;
-import com.cinchapi.concourse.util.ByteBuffers;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 
 /**
@@ -44,7 +47,8 @@ import com.google.common.base.Preconditions;
  * @param <V> - the value type
  */
 @Immutable
-public abstract class Revision<L extends Comparable<L> & Byteable, K extends Comparable<K> & Byteable, V extends Comparable<V> & Byteable> implements
+public abstract class Revision<L extends Comparable<L> & Byteable, K extends Comparable<K> & Byteable, V extends Comparable<V> & Byteable>
+        implements
         Byteable,
         Versioned {
 
@@ -60,9 +64,9 @@ public abstract class Revision<L extends Comparable<L> & Byteable, K extends Com
      * 
      * @return the PrimaryRevision
      */
-    public static PrimaryRevision createPrimaryRevision(PrimaryKey record,
-            Text key, Value value, long version, Action type) {
-        return new PrimaryRevision(record, key, value, version, type);
+    public static TableRevision createTableRevision(Identifier record, Text key,
+            Value value, long version, Action type) {
+        return new TableRevision(record, key, value, version, type);
     }
 
     /**
@@ -76,9 +80,9 @@ public abstract class Revision<L extends Comparable<L> & Byteable, K extends Com
      * @param type
      * @return the SearchRevision
      */
-    public static SearchRevision createSearchRevision(Text key, Text word,
+    public static CorpusRevision createCorpusRevision(Text key, Text word,
             Position position, long version, Action type) {
-        return new SearchRevision(key, word, position, version, type);
+        return new CorpusRevision(key, word, position, version, type);
     }
 
     /**
@@ -92,9 +96,31 @@ public abstract class Revision<L extends Comparable<L> & Byteable, K extends Com
      * @param type
      * @return the SecondaryRevision
      */
-    public static SecondaryRevision createSecondaryRevision(Text key,
-            Value value, PrimaryKey record, long version, Action type) {
-        return new SecondaryRevision(key, value, record, version, type);
+    public static IndexRevision createIndexRevision(Text key, Value value,
+            Identifier record, long version, Action type) {
+        return new IndexRevision(key, value, record, version, type);
+    }
+
+    /**
+     * Return {@code true} if {@code obj} is considered {@link Text#isCompact()}
+     * (e.g. it is directly compact Text or it is a {@link Value} that wraps
+     * compact Text}.
+     * 
+     * @param obj
+     * @return a boolean that indicates if {@code obj} is compact Text.
+     */
+    @VisibleForTesting
+    protected static boolean isCompactText(Object obj) {
+        if(obj instanceof Text) {
+            return ((Text) obj).isCompact();
+        }
+        else if(obj instanceof Value) {
+            Object o2 = ((Value) obj).getObject();
+            if(o2 instanceof Text) {
+                return ((Text) o2).isCompact();
+            }
+        }
+        return false;
     }
 
     /**
@@ -128,6 +154,15 @@ public abstract class Revision<L extends Comparable<L> & Byteable, K extends Com
     private transient final int size;
 
     /**
+     * Tracks when the {@link Revision} was
+     * {@link #Revision(Comparable, Comparable, Comparable, long, Action)
+     * created} or {@link #Revision(ByteBuffer) loaded}. Helps to disambiguate
+     * and sequence {@link Revision Revisions} with the same {@link #version
+     * version}.
+     */
+    private final transient long stamp;
+
+    /**
      * An field indicating the action performed to generate this Revision. This
      * information is recorded so that we can efficiently purge history while
      * maintaining consistent state.
@@ -141,8 +176,9 @@ public abstract class Revision<L extends Comparable<L> & Byteable, K extends Com
     private final V value;
 
     /**
-     * The unique version that identifies this Revision. Versions are assumed to
-     * be an atomically increasing values (i.e. timestamps).
+     * The version that of this Revision. Revisions created within the same
+     * commit may have the same version. Across commits, versions are
+     * assumed to be a monotonically increasing value (e.g. timestamps).
      */
     private final long version;
 
@@ -162,18 +198,29 @@ public abstract class Revision<L extends Comparable<L> & Byteable, K extends Com
      */
     @DoNotInvoke
     public Revision(ByteBuffer bytes) {
+        this.stamp = CommitVersions.next();
         this.bytes = bytes;
+        this.size = bytes.remaining();
         this.type = Action.values()[bytes.get()];
         this.version = bytes.getLong();
-        this.locator = Byteables.readStatic(ByteBuffers.get(bytes,
-                xLocatorSize() == VARIABLE_SIZE ? bytes.getInt()
-                        : xLocatorSize()), xLocatorClass());
-        this.key = Byteables.readStatic(ByteBuffers.get(bytes,
-                xKeySize() == VARIABLE_SIZE ? bytes.getInt() : xKeySize()),
-                xKeyClass());
-        this.value = Byteables.readStatic(
-                ByteBuffers.get(bytes, bytes.remaining()), xValueClass());
-        this.size = bytes.capacity();
+        int limit = bytes.limit();
+
+        // Locator
+        int locatorSize = xLocatorSize() == VARIABLE_SIZE ? bytes.getInt()
+                : xLocatorSize();
+        bytes.limit(bytes.position() + locatorSize);
+        this.locator = Byteables.readStatic(bytes, xLocatorClass());
+        bytes.limit(limit);
+
+        // Key
+        int keySize = xKeySize() == VARIABLE_SIZE ? bytes.getInt() : xKeySize();
+        bytes.limit(bytes.position() + keySize);
+        this.key = Byteables.readStatic(bytes, xKeyClass());
+        bytes.limit(limit);
+
+        // Locator
+        this.value = Byteables.readStatic(bytes, xValueClass());
+        bytes.limit(limit);
     }
 
     /**
@@ -187,6 +234,7 @@ public abstract class Revision<L extends Comparable<L> & Byteable, K extends Com
      */
     protected Revision(L locator, K key, V value, long version, Action type) {
         Preconditions.checkArgument(type != Action.COMPARE);
+        this.stamp = CommitVersions.next();
         this.type = type;
         this.locator = locator;
         this.key = key;
@@ -209,6 +257,36 @@ public abstract class Revision<L extends Comparable<L> & Byteable, K extends Com
     }
 
     /**
+     * Copy a byte sequence that represents this Revision with the following
+     * order:
+     * <ol>
+     * <li><strong>version</strong></li>
+     * <li><strong>locatorSize</strong> -
+     * <em>if {@link #xLocatorSize()} == {@link #VARIABLE_SIZE}</em></li>
+     * <li><strong>locator</strong></li>
+     * <li><strong>keySize</strong> -
+     * <em>if {@link #xKeySize()} == {@link #VARIABLE_SIZE}</em></li>
+     * <li><strong>key</strong></li>
+     * <li><strong>value</strong></li>
+     * 
+     * </ol>
+     */
+    @Override
+    public void copyTo(ByteSink sink) {
+        sink.put((byte) type.ordinal());
+        sink.putLong(version);
+        if(xLocatorSize() == VARIABLE_SIZE) {
+            sink.putInt(locator.size());
+        }
+        locator.copyTo(sink);
+        if(xKeySize() == VARIABLE_SIZE) {
+            sink.putInt(key.size());
+        }
+        key.copyTo(sink);
+        value.copyTo(sink);
+    }
+
+    /**
      * {@inheritDoc}
      * <p>
      * <strong>NOTE: The Revision type is NOT considered when determining
@@ -226,31 +304,20 @@ public abstract class Revision<L extends Comparable<L> & Byteable, K extends Com
         return false;
     }
 
-    /**
-     * Return a byte buffer that represents this Revision with the following
-     * order:
-     * <ol>
-     * <li><strong>version</strong></li>
-     * <li><strong>locatorSize</strong> -
-     * <em>if {@link #xLocatorSize()} == {@link #VARIABLE_SIZE}</em></li>
-     * <li><strong>locator</strong></li>
-     * <li><strong>keySize</strong> -
-     * <em>if {@link #xKeySize()} == {@link #VARIABLE_SIZE}</em></li>
-     * <li><strong>key</strong></li>
-     * <li><strong>value</strong></li>
-     * 
-     * </ol>
-     * 
-     * @return the ByteBuffer representation
-     */
     @Override
     public ByteBuffer getBytes() {
         if(bytes == null) {
-            bytes = ByteBuffer.allocate(size());
-            copyTo(bytes);
-            bytes.rewind();
+            bytes = Byteable.super.getBytes();
         }
-        return ByteBuffers.asReadOnlyBuffer(bytes);
+        ByteBuffer bytes = ByteBuffers.asReadOnlyBuffer(this.bytes);
+        if(isCompactText(locator) || isCompactText(key)
+                || isCompactText(value)) {
+            // If any component of this Revision is compact Text, don't cache
+            // the #bytes in memory so that the desire for space efficiency is
+            // maintained.
+            this.bytes = null;
+        }
+        return bytes;
     }
 
     /**
@@ -310,24 +377,14 @@ public abstract class Revision<L extends Comparable<L> & Byteable, K extends Com
     }
 
     @Override
-    public String toString() {
-        return type + " " + key + " AS " + value + " IN " + locator + " AT "
-                + version;
+    public long stamp() {
+        return stamp;
     }
 
     @Override
-    public void copyTo(ByteBuffer buffer) {
-        buffer.put((byte) type.ordinal());
-        buffer.putLong(version);
-        if(xLocatorSize() == VARIABLE_SIZE) {
-            buffer.putInt(locator.size());
-        }
-        locator.copyTo(buffer);
-        if(xKeySize() == VARIABLE_SIZE) {
-            buffer.putInt(key.size());
-        }
-        key.copyTo(buffer);
-        value.copyTo(buffer);
+    public String toString() {
+        return type + " " + key + " AS " + value + " IN " + locator + " AT "
+                + version;
     }
 
     /**

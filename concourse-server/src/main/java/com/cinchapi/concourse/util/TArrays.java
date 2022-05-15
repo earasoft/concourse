@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
+ * Copyright (c) 2013-2022 Cinchapi Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,6 +16,9 @@
 package com.cinchapi.concourse.util;
 
 import java.nio.ByteBuffer;
+
+import com.cinchapi.concourse.server.model.Identifier;
+import com.cinchapi.concourse.server.model.Text;
 
 /**
  * Utilities for dealing with generic arrays.
@@ -47,7 +50,22 @@ public final class TArrays {
             // the array by that object's hashcode and the name of the
             // object's class.
             bytes.putInt(object.hashCode());
-            bytes.putInt(object.getClass().getName().hashCode());
+
+            String clazz;
+            if(object instanceof Text) {
+                // Backwards compatibility for versions prior to 0.10.6 that
+                // didn't have multiple kinds of Text
+                clazz = Text.class.getName();
+            }
+            else if(object instanceof Identifier) {
+                // Backwards compatibility for versions prior to 0.11.0 when
+                // Identifier was named PrimaryKey
+                clazz = "com.cinchapi.concourse.server.model.PrimaryKey";
+            }
+            else {
+                clazz = object.getClass().getName();
+            }
+            bytes.putInt(clazz.hashCode());
         }
         bytes.rewind();
         return bytes;

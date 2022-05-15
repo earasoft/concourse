@@ -1,4 +1,4 @@
-# Copyright (c) 2013-2016 Cinchapi Inc.
+# Copyright (c) 2013-2022 Cinchapi Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -840,9 +840,9 @@ class Concourse(object):
         """
 
         :param key:
-        :param source:
         :param destinations:
         :param destination:
+        :param source:
         :return:
         """
         destinations = destinations or kwargs.get('destination')
@@ -872,6 +872,20 @@ class Concourse(object):
             return self.client.pingRecords(records, self.creds, self.transaction, self.environment)
         else:
             return self.client.pingRecord(records, self.creds, self.transaction, self.environment)
+
+    def reconcile(self, key, record, values, **kwargs):
+        """
+
+        :param key:
+        :param record:
+        :param values:
+        :return:
+        """
+        key = key or kwargs.get('key')
+        record = record or kwargs.get('record')
+        values = values or kwargs.get('values') or kwargs.get('value') or []
+        values = thriftify(values);
+        self.client.reconcileKeyRecordValues(key, record, values, self.creds, self.transaction, self.environment)
 
     def remove(self, key, value, records=None, **kwargs):
         """
@@ -1080,8 +1094,8 @@ class Concourse(object):
         """
 
         :param key:
-        :param source:
         :param destination:
+        :param source:
         :return:
         """
         destinations = destinations or kwargs.get('destination')

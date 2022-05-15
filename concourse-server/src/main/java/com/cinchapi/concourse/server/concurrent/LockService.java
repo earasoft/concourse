@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,10 +15,9 @@
  */
 package com.cinchapi.concourse.server.concurrent;
 
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantReadWriteLock.ReadLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock.WriteLock;
-
-import jsr166e.ConcurrentHashMapV8;
 
 /**
  * A service that provides ReadLock and WriteLock instances for a given
@@ -36,7 +35,8 @@ import jsr166e.ConcurrentHashMapV8;
  * 
  * @author Jeff Nelson
  */
-public class LockService extends AbstractLockService<Token, TokenReadWriteLock> {
+public class LockService
+        extends AbstractLockService<Token, TokenReadWriteLock> {
 
     /**
      * Return a new {@link LockService} instance.
@@ -45,7 +45,7 @@ public class LockService extends AbstractLockService<Token, TokenReadWriteLock> 
      */
     public static LockService create() {
         return new LockService(
-                new ConcurrentHashMapV8<Token, TokenReadWriteLock>());
+                new ConcurrentHashMap<Token, TokenReadWriteLock>());
     }
 
     /**
@@ -86,7 +86,7 @@ public class LockService extends AbstractLockService<Token, TokenReadWriteLock> 
      * 
      * @param locks
      */
-    private LockService(ConcurrentHashMapV8<Token, TokenReadWriteLock> locks) {
+    private LockService(ConcurrentHashMap<Token, TokenReadWriteLock> locks) {
         super(locks);
     }
 

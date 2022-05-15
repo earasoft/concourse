@@ -1,12 +1,12 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -23,13 +23,13 @@ import javax.annotation.Nullable;
 import org.apache.commons.lang.StringUtils;
 import org.slf4j.Logger;
 
+import com.cinchapi.common.base.AnyStrings;
+import com.cinchapi.common.base.QuoteAwareStringSplitter;
 import com.cinchapi.concourse.Concourse;
 import com.cinchapi.concourse.Constants;
 import com.cinchapi.concourse.thrift.Operator;
 import com.cinchapi.concourse.util.Convert;
 import com.cinchapi.concourse.util.FileOps;
-import com.cinchapi.concourse.util.QuoteAwareStringSplitter;
-import com.cinchapi.concourse.util.Strings;
 import com.cinchapi.concourse.util.TLists;
 import com.google.common.collect.Lists;
 import com.google.gson.JsonArray;
@@ -83,7 +83,8 @@ public abstract class LineBasedImporter extends JsonImporter {
      *         records created/affected from the import and whether any errors
      *         occurred.
      */
-    public final Set<Long> importFile(String file, @Nullable String resolveKey) {
+    public final Set<Long> importFile(String file,
+            @Nullable String resolveKey) {
         // TODO add option to specify batchSize, which is how many objects to
         // send over the wire in one atomic batch
         List<String> lines = FileOps.readLines(file);
@@ -97,7 +98,7 @@ public abstract class LineBasedImporter extends JsonImporter {
             }
             if(keys == null) {
                 keys = parseKeys(line);
-                 log.info("Parsed keys from header: " + line);
+                log.info("Parsed keys from header: " + line);
             }
             else {
                 JsonObject object = parseLine(line, keys);
@@ -108,7 +109,8 @@ public abstract class LineBasedImporter extends JsonImporter {
                         temp.add(resolveValue);
                         resolveValue = temp;
                     }
-                    for (int i = 0; i < resolveValue.getAsJsonArray().size(); ++i) {
+                    for (int i = 0; i < resolveValue.getAsJsonArray()
+                            .size(); ++i) {
                         String value = resolveValue.getAsJsonArray().get(i)
                                 .toString();
                         Object stored = Convert.stringToJava(value);
@@ -130,7 +132,7 @@ public abstract class LineBasedImporter extends JsonImporter {
                 else {
                     array.add(object);
                 }
-                 log.info("Importing {}", line);
+                log.info("Importing {}", line);
             }
 
         }
@@ -168,7 +170,8 @@ public abstract class LineBasedImporter extends JsonImporter {
      * be used by subclasses to define dynamic intermediary transformations to
      * data to better prepare it for import.
      * </p>
-     * <h1>Examples</h1> <h2>Specifying Link Resolution</h2>
+     * <h1>Examples</h1>
+     * <h2>Specifying Link Resolution</h2>
      * <p>
      * The server will convert raw data of the form
      * <code>@&lt;key&gt;@value@&lt;key&gt;@</code> into a Link to all the
@@ -198,10 +201,10 @@ public abstract class LineBasedImporter extends JsonImporter {
     protected JsonElement transformValue(String key, String value) {
         JsonPrimitive element;
         Object parsed;
-        if((parsed = Strings.tryParseNumberStrict(value)) != null) {
+        if((parsed = AnyStrings.tryParseNumberStrict(value)) != null) {
             element = new JsonPrimitive((Number) parsed);
         }
-        else if((parsed = Strings.tryParseBoolean(value)) != null) {
+        else if((parsed = AnyStrings.tryParseBoolean(value)) != null) {
             element = new JsonPrimitive((Boolean) parsed);
         }
         else {
@@ -242,7 +245,7 @@ public abstract class LineBasedImporter extends JsonImporter {
             keys = TLists.toArrayCasted(keysList, String.class);
         }
         else {
-            keys = Strings.splitStringByDelimiterButRespectQuotes(line,
+            keys = AnyStrings.splitStringByDelimiterButRespectQuotes(line,
                     delimiter());
             for (int i = 0; i < keys.length; ++i) {
                 keys[i] = keys[i].trim();
@@ -275,7 +278,7 @@ public abstract class LineBasedImporter extends JsonImporter {
             toks = TLists.toArrayCasted(toksList, String.class);
         }
         else {
-            toks = Strings.splitStringByDelimiterButRespectQuotes(line,
+            toks = AnyStrings.splitStringByDelimiterButRespectQuotes(line,
                     delimiter());
         }
         for (int i = 0; i < Math.min(keys.length, toks.length); ++i) {

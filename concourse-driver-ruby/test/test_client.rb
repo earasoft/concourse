@@ -1,4 +1,4 @@
-# Copyright (c) 2013-2016 Cinchapi Inc.
+# Copyright (c) 2013-2022 Cinchapi Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -2282,6 +2282,25 @@ class RubyClientDriverTest < IntegrationBaseTest
         }
         record = @client.find_or_insert criteria:"age > 10", data:data
         assert_equal "Jeff Nelson", @client.get(key:"name", record:record)
+    end
+
+    def test_reconcile_empty_values
+        @client.reconcile key:"foo", record:17, values:[]
+        assert_equal 0, @client.select(key:"foo", record:17).length
+    end
+
+    def test_reconcile
+        record = 1
+        key = "testKey"
+        @client.add(key, "A", record)
+        @client.add(key, "C", record)
+        @client.add(key, "D", record)
+        @client.add(key, "E", record)
+        @client.add(key, "F", record)
+        values = ['A', 'B', 'D', 'G']
+        @client.reconcile(key:key, record:record, values:values)
+        stored = @client.select(key:key, record:record)
+        assert_equal(values.sort!, stored.sort!)
     end
 
 end

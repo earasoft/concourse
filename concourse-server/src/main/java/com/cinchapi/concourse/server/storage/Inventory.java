@@ -1,11 +1,11 @@
 /*
- * Copyright (c) 2013-2016 Cinchapi Inc.
+ * Copyright (c) 2013-2022 Cinchapi Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,10 +20,9 @@ import java.nio.channels.FileChannel.MapMode;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.locks.StampedLock;
 
 import javax.annotation.concurrent.ThreadSafe;
-
-import jsr166e.StampedLock;
 
 import com.cinchapi.concourse.server.io.FileSystem;
 import com.cinchapi.concourse.util.Integers;
@@ -67,7 +66,7 @@ public class Inventory {
      * The bitset that contains the read-efficient version of the data in the
      * inventory.
      */
-    private final LongBitSet bitSet;
+    private final LongBitSet bits;
 
     /**
      * A memory mapped buffer that is used to handle writes to the backing
@@ -94,7 +93,7 @@ public class Inventory {
      */
     private Inventory(String backingStore) {
         this.backingStore = backingStore;
-        this.bitSet = LongBitSet.create();
+        this.bits = LongBitSet.create();
         this.content = FileSystem.map(backingStore, MapMode.READ_ONLY, 0,
                 FileSystem.getFileSize(backingStore));
         while (content.position() < content.capacity()) {
@@ -109,7 +108,7 @@ public class Inventory {
                 break;
             }
             else {
-                bitSet.set(record);
+                bits.set(record);
             }
         }
         map0(content.position(), MEMORY_MAPPING_SIZE);
@@ -123,7 +122,7 @@ public class Inventory {
     public void add(long record) {
         long stamp = lock.writeLock();
         try {
-            if(bitSet.set(record)) {
+            if(bits.set(record)) {
                 dirty.add(record);
             }
         }
@@ -140,14 +139,14 @@ public class Inventory {
      */
     public boolean contains(long record) {
         long stamp = lock.tryOptimisticRead();
-        boolean result = bitSet.get(record);
+        boolean result = bits.get(record);
         if(lock.validate(stamp)) {
             return result;
         }
         else {
             stamp = lock.readLock();
             try {
-                return bitSet.get(record);
+                return bits.get(record);
             }
             finally {
                 lock.unlockRead(stamp);
@@ -161,7 +160,7 @@ public class Inventory {
      * @return {@code Set<Long>}
      */
     public Set<Long> getAll() {
-        return (Set<Long>) bitSet.toIterable();
+        return (Set<Long>) bits.toIterable();
     }
 
     /**

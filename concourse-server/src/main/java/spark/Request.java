@@ -1,13 +1,12 @@
 /*
- * Copyright 2011- Per Wendel
- * 
+ * Copyright (c) 2013-2022 Cinchapi Inc.
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
- * 
+ *
  * http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -30,16 +29,14 @@ import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpSession;
 
-import spark.QueryParamsMap;
-import spark.Request;
-import spark.Session;
 import spark.route.HttpMethod;
 import spark.route.RouteMatch;
 import spark.utils.IOUtils;
 import spark.utils.SparkUtils;
 
+import com.cinchapi.common.base.CheckedExceptions;
+import com.cinchapi.concourse.server.http.HttpRequest;
 import com.cinchapi.concourse.util.DataServices;
-import com.google.common.base.Throwables;
 import com.google.common.collect.Lists;
 import com.google.gson.JsonElement;
 
@@ -48,7 +45,7 @@ import com.google.gson.JsonElement;
  *
  * @author Per Wendel
  */
-public class Request {
+public class Request implements HttpRequest {
 
     private static Map<String, String> getParams(List<String> request,
             List<String> matched) {
@@ -72,7 +69,8 @@ public class Request {
 
         List<String> splat = new ArrayList<String>();
 
-        for (int i = 0; (i < nbrOfRequestParts) && (i < nbrOfMatchedParts); i++) {
+        for (int i = 0; (i < nbrOfRequestParts)
+                && (i < nbrOfMatchedParts); i++) {
             String matchedPart = matched.get(i);
 
             if(SparkUtils.isSplat(matchedPart)) {
@@ -89,6 +87,7 @@ public class Request {
         }
         return Collections.unmodifiableList(splat);
     }
+
     /**
      * A collection that only contains an empty string, which is used to filter
      * lists (i.e. {@link List#removeAll(java.util.Collection)} empty strings).
@@ -143,10 +142,10 @@ public class Request {
         this.httpMethod = match.getHttpMethod();
         this.servletRequest = request;
 
-        List<String> requestList = SparkUtils.convertRouteToList(match
-                .getRequestURI());
-        List<String> matchedList = SparkUtils.convertRouteToList(match
-                .getMatchUri());
+        List<String> requestList = SparkUtils
+                .convertRouteToList(match.getRequestURI());
+        List<String> matchedList = SparkUtils
+                .convertRouteToList(match.getMatchUri());
 
         params = getParams(requestList, matchedList);
         splat = getSplat(requestList, matchedList);
@@ -198,7 +197,7 @@ public class Request {
                 body = IOUtils.toString(servletRequest.getInputStream());
             }
             catch (Exception e) {
-                throw Throwables.propagate(e);
+                throw CheckedExceptions.wrapAsRuntimeException(e);
             }
         }
         return body;
